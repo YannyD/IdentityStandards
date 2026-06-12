@@ -10,6 +10,14 @@ import {
     OPERATION_3_STATICCALL,
     OPERATION_4_DELEGATECALL
 } from "../src/ERC725X.sol";
+import {
+    ERC725XCreatedContract,
+    ERC725XDelegateTarget,
+    ERC725XOperationTarget,
+    ERC725YSignedDataHarness
+} from "./contracts/index.sol";
+
+error ERC725XTest_InvalidAddressBytes();
 
 contract ERC725XTest is Test {
     ERC725X internal erc725X;
@@ -115,11 +123,14 @@ contract ERC725XTest is Test {
         pure
         returns (address)
     {
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, keccak256(bytecode))))));
+        bytes32 bytecodeHash = keccak256(bytecode);
+        bytes32 addressHash = keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, bytecodeHash));
+
+        return address(uint160(uint256(addressHash)));
     }
 
     function _addressFromBytes(bytes memory data) internal pure returns (address account) {
-        require(data.length == 20, "ERC725XTest: invalid address bytes");
+        if (data.length != 20) revert ERC725XTest_InvalidAddressBytes();
 
         // solhint-disable-next-line no-inline-assembly
         assembly {
@@ -128,45 +139,160 @@ contract ERC725XTest is Test {
     }
 }
 
-contract ERC725XOperationTarget {
-    uint256 public storedNumber;
+contract ERC725YTest is Test {
+    bytes32 internal constant INVESTOR_ACCREDITATION_STATUS_DATA_KEY =
+        keccak256("identity.walletHolder.investorAccreditationStatus");
+    bytes32 internal constant RESIDENCE_DATA_KEY = keccak256("identity.walletHolder.residence");
+    string internal constant RESIDENCE = "Texas";
 
-    event NumberStored(uint256 indexed number, address indexed caller, uint256 value);
+    ERC725YSignedDataHarness internal erc725Y;
 
-    constructor(uint256 initialNumber) payable {
-        storedNumber = initialNumber;
+    address internal wallet;
+    uint256 internal walletPrivateKey;
+    address internal accreditationIssuer;
+    uint256 internal accreditationIssuerPrivateKey;
+    address internal thirdPartyReader;
+    bytes internal accreditationSignature;
+    bytes internal residenceSignature;
+    mapping(address signer => bool approved) internal approvedSigners;
+
+    function setUp() public virtual {
+        (wallet, walletPrivateKey) = makeAddrAndKey("wallet");
+        (accreditationIssuer, accreditationIssuerPrivateKey) = makeAddrAndKey("accreditationIssuer");
+        thirdPartyReader = makeAddr("thirdPartyReader");
+        approvedSigners[accreditationIssuer] = true;
+
+        vm.prank(wallet);
+        erc725Y = new ERC725YSignedDataHarness();
+
+        bytes memory accreditationStatus = abi.encode(true);
+        accreditationSignature = _signSetData(
+            accreditationIssuerPrivateKey,
+            accreditationIssuer,
+            wallet,
+            INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+            accreditationStatus
+        );
+
+        vm.prank(accreditationIssuer);
+        erc725Y.setDataWithSignature(
+            accreditationIssuer,
+            wallet,
+            INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+            accreditationStatus,
+            accreditationSignature
+        );
+
+        bytes memory residence = bytes(RESIDENCE);
+        residenceSignature = _signSetData(walletPrivateKey, wallet, wallet, RESIDENCE_DATA_KEY, residence);
+
+        vm.prank(wallet);
+        erc725Y.setDataWithSignature(wallet, wallet, RESIDENCE_DATA_KEY, residence, residenceSignature);
     }
 
-    function setNumber(uint256 newNumber) external payable returns (uint256, address, uint256) {
-        storedNumber = newNumber;
-        emit NumberStored(newNumber, msg.sender, msg.value);
-
-        return (storedNumber, msg.sender, msg.value);
+    function test_SetUpDeploysERC725YTiedToWallet() external view {
+        assertEq(erc725Y.owner(), wallet);
     }
 
-    function readNumber() external view returns (uint256, address, uint256) {
-        return (storedNumber, msg.sender, address(this).balance);
+    function test_SetUpStoresInvestorAccreditationStatus() external view {
+        bytes memory storedValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
+        bytes32 expectedClaimKey = erc725Y.getClaimKey(
+            accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, keccak256(storedValue)
+        );
+        bytes memory claimValue = erc725Y.getData(claimKey);
+        (
+            address signer,
+            address postedBy,
+            address subject,
+            bytes32 dataKey,
+            bytes memory dataValue,
+            uint256 nonce,
+            bytes memory signature
+        ) = abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+
+        assertTrue(abi.decode(storedValue, (bool)));
+        assertEq(claimKey, expectedClaimKey);
+        assertEq(signer, accreditationIssuer);
+        assertEq(postedBy, accreditationIssuer);
+        assertEq(subject, wallet);
+        assertEq(dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        assertTrue(abi.decode(dataValue, (bool)));
+        assertEq(nonce, 0);
+        assertEq(keccak256(signature), keccak256(accreditationSignature));
+        assertEq(erc725Y.nonces(accreditationIssuer), 1);
+    }
+
+    function test_ThirdPartyReadsAccreditationSigner() external {
+        vm.prank(thirdPartyReader);
+        bytes memory storedValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+
+        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+
+        vm.prank(thirdPartyReader);
+        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
+
+        vm.prank(thirdPartyReader);
+        bytes memory claimValue = erc725Y.getData(claimKey);
+
+        (address signer, address postedBy, address subject, bytes32 dataKey, bytes memory dataValue,,) =
+            abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+
+        assertTrue(abi.decode(storedValue, (bool)));
+        assertEq(signer, accreditationIssuer);
+        assertTrue(approvedSigners[signer]);
+        assertEq(postedBy, accreditationIssuer);
+        assertEq(subject, wallet);
+        assertEq(dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        assertTrue(abi.decode(dataValue, (bool)));
+    }
+
+    function test_SetUpStoresWalletResidence() external view {
+        bytes memory storedValue = erc725Y.getData(RESIDENCE_DATA_KEY);
+        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(RESIDENCE_DATA_KEY);
+        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
+        bytes32 expectedClaimKey = erc725Y.getClaimKey(wallet, wallet, RESIDENCE_DATA_KEY, keccak256(storedValue));
+        bytes memory claimValue = erc725Y.getData(claimKey);
+        (
+            address signer,
+            address postedBy,
+            address subject,
+            bytes32 dataKey,
+            bytes memory dataValue,
+            uint256 nonce,
+            bytes memory signature
+        ) = abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+
+        assertEq(string(storedValue), RESIDENCE);
+        assertEq(claimKey, expectedClaimKey);
+        assertEq(signer, wallet);
+        assertEq(postedBy, wallet);
+        assertEq(subject, wallet);
+        assertEq(dataKey, RESIDENCE_DATA_KEY);
+        assertEq(string(dataValue), RESIDENCE);
+        assertEq(nonce, 0);
+        assertEq(keccak256(signature), keccak256(residenceSignature));
+        assertEq(erc725Y.nonces(wallet), 1);
+    }
+
+    function _signSetData(
+        uint256 signerPrivateKey,
+        address signer,
+        address subject,
+        bytes32 dataKey,
+        bytes memory dataValue
+    )
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = erc725Y.hashSetData(subject, dataKey, keccak256(dataValue), erc725Y.nonces(signer));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, digest);
+
+        return abi.encodePacked(r, s, v);
     }
 }
 
-contract ERC725XCreatedContract {
-    uint256 public immutable initialNumber;
-    address public immutable creator;
-    uint256 public immutable creationValue;
-
-    constructor(uint256 initialNumber_) payable {
-        initialNumber = initialNumber_;
-        creator = msg.sender;
-        creationValue = msg.value;
-    }
-}
-
-contract ERC725XDelegateTarget {
-    address public ownerSlot;
-
-    function setOwnerSlot(address newOwner) external returns (address) {
-        ownerSlot = newOwner;
-
-        return ownerSlot;
-    }
-}
+error ERC725YTest_InvalidSignature(address expectedSigner, address actualSigner);
+error ERC725YTest_InvalidSubject(address expectedSubject, address actualSubject);
