@@ -8,6 +8,11 @@ import { ERC725Y } from "./ERC725Y.sol";
 
 error ERC725YSignedClaimStore_InvalidSignature(address expectedSigner, address actualSigner);
 error ERC725YSignedClaimStore_InvalidSubject(address expectedSubject, address actualSubject);
+error ERC725YSignedClaimStore_InvalidDataKeyController(address controller);
+error ERC725YSignedClaimStore_NotDataKeyController(bytes32 dataKey, address controller, address signer);
+error ERC725YSignedClaimStore_NotDataKeyControllerOrOwner(
+    bytes32 dataKey, address caller, address controller, address owner
+);
 
 contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
     bytes32 internal constant SET_DATA_TYPEHASH =
@@ -24,6 +29,7 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
     }
 
     mapping(address signer => uint256 nonce) public nonces;
+    mapping(bytes32 dataKey => address controller) public dataKeyControllers;
 
     event SignedClaimStored(
         bytes32 indexed claimKey,
@@ -32,6 +38,10 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         address subject,
         bytes32 dataKey,
         bytes dataValue
+    );
+
+    event DataKeyControllerChanged(
+        bytes32 indexed dataKey, address indexed previousController, address indexed newController
     );
 
     constructor() EIP712("ERC725Y", "1") { }
@@ -57,6 +67,8 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
             revert ERC725YSignedClaimStore_InvalidSignature(signer, recoveredSigner);
         }
 
+        _assignOrCheckDataKeyController(dataKey, recoveredSigner);
+
         nonces[signer] = nonce + 1;
 
         bytes32 dataValueHash = keccak256(dataValue);
@@ -70,6 +82,27 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         _setData(latestClaimPointerKey, abi.encode(claimKey));
 
         emit SignedClaimStored(claimKey, recoveredSigner, msg.sender, subject, dataKey, dataValue);
+    }
+
+    function transferDataKeyController(bytes32 dataKey, address newController) external {
+        if (newController == address(0)) {
+            revert ERC725YSignedClaimStore_InvalidDataKeyController(newController);
+        }
+
+        _checkDataKeyControllerOrOwner(dataKey);
+        _setDataKeyController(dataKey, newController);
+    }
+
+    function clearDataKey(bytes32 dataKey) external {
+        _checkDataKeyControllerOrOwner(dataKey);
+
+        address previousController = dataKeyControllers[dataKey];
+        delete dataKeyControllers[dataKey];
+
+        _setData(dataKey, "");
+        _setData(getLatestClaimPointerKey(dataKey), "");
+
+        emit DataKeyControllerChanged(dataKey, previousController, address(0));
     }
 
     function getClaimKey(
@@ -109,6 +142,36 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         bytes32 structHash = keccak256(abi.encode(SET_DATA_TYPEHASH, subject, dataKey, dataValueHash, nonce));
 
         return _hashTypedDataV4(structHash);
+    }
+
+    function _assignOrCheckDataKeyController(bytes32 dataKey, address signer) internal {
+        address controller = dataKeyControllers[dataKey];
+
+        if (controller == address(0)) {
+            _setDataKeyController(dataKey, signer);
+            return;
+        }
+
+        if (controller != signer) {
+            revert ERC725YSignedClaimStore_NotDataKeyController(dataKey, controller, signer);
+        }
+    }
+
+    function _checkDataKeyControllerOrOwner(bytes32 dataKey) internal view {
+        address controller = dataKeyControllers[dataKey];
+        address account = msg.sender;
+        address contractOwner = owner();
+
+        if (account != contractOwner && account != controller) {
+            revert ERC725YSignedClaimStore_NotDataKeyControllerOrOwner(dataKey, account, controller, contractOwner);
+        }
+    }
+
+    function _setDataKeyController(bytes32 dataKey, address newController) internal {
+        address previousController = dataKeyControllers[dataKey];
+        dataKeyControllers[dataKey] = newController;
+
+        emit DataKeyControllerChanged(dataKey, previousController, newController);
     }
 
     function _decodeSignedClaim(bytes memory claimValue) internal pure returns (SignedClaim memory signedClaim) {

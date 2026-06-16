@@ -8,10 +8,16 @@ efficient and flexible for many use cases.
 ## Standard Implementation
 
 ERC-725Y stores arbitrary data as `bytes32` keys mapped to `bytes` values. This implementation uses that single
-key-value store for identity claims while also preserving the provenance of each claim. A claim can be posted by any
-address, but it is accepted only if the supplied EIP-712 signature matches the claimed signer, subject, key, value, and
-nonce. Third parties can then read the stored value, find the related signed claim record, and check whether the signer
-is one they trust. The `ERC725YSignedClaimStore` contract writes the following entries for each signed claim:
+key-value store for identity claims while also preserving the provenance of each claim. A claim can be posted only when
+the supplied EIP-712 signature matches the claimed signer, subject, key, value, and nonce.
+
+`ERC725YSignedClaimStore` also tracks a controller for each data key. The first valid signer for a data key becomes its
+controller. After that, only the current controller can update the claim for that key. The controller can transfer or
+clear control, and the ERC-725Y owner can also transfer or clear control so the subject can recover from stale or
+unwanted claims. Third parties can then read the stored value, find the related signed claim record, and check whether
+the active signer is one they trust.
+
+The `ERC725YSignedClaimStore` contract writes the following entries for each signed claim:
 
 1. Data key -> claim value.
 
@@ -58,6 +64,17 @@ latestClaimPointerKey = keccak256(abi.encodePacked("ERC725Y.latestClaim", dataKe
 This allows a third party to use the data key to find the correct claim key, which can be used to verify the signer who
 originally posted the claim. The `getLatestClaim(dataKey)` helper follows this pointer and returns the decoded signed
 claim record.
+
+4. Data key controller.
+
+The first valid signer for a data key is tracked as its controller.
+
+```solidity
+dataKeyControllers[dataKey] = signer_address;
+```
+
+Future calls to `setDataWithSignature` for the same `dataKey` must be signed by this controller. Control can be moved
+with `transferDataKeyController(dataKey, newController)` or released with `clearDataKey(dataKey)`.
 
 These data store additions are performed by `ERC725YSignedClaimStore.setDataWithSignature`.
 
