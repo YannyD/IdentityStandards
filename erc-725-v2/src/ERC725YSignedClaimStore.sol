@@ -13,6 +13,16 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
     bytes32 internal constant SET_DATA_TYPEHASH =
         keccak256("SetData(address subject,bytes32 dataKey,bytes32 dataValueHash,uint256 nonce)");
 
+    struct SignedClaim {
+        address signer;
+        address postedBy;
+        address subject;
+        bytes32 dataKey;
+        bytes dataValue;
+        uint256 nonce;
+        bytes signature;
+    }
+
     mapping(address signer => uint256 nonce) public nonces;
 
     event SignedClaimStored(
@@ -79,6 +89,13 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         return keccak256(abi.encodePacked("ERC725Y.latestClaim", dataKey));
     }
 
+    function getLatestClaim(bytes32 dataKey) public view returns (SignedClaim memory signedClaim) {
+        bytes32 latestClaimPointerKey = getLatestClaimPointerKey(dataKey);
+        bytes32 claimKey = abi.decode(getData(latestClaimPointerKey), (bytes32));
+
+        return _decodeSignedClaim(getData(claimKey));
+    }
+
     function hashSetData(
         address subject,
         bytes32 dataKey,
@@ -92,5 +109,17 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         bytes32 structHash = keccak256(abi.encode(SET_DATA_TYPEHASH, subject, dataKey, dataValueHash, nonce));
 
         return _hashTypedDataV4(structHash);
+    }
+
+    function _decodeSignedClaim(bytes memory claimValue) internal pure returns (SignedClaim memory signedClaim) {
+        (
+            signedClaim.signer,
+            signedClaim.postedBy,
+            signedClaim.subject,
+            signedClaim.dataKey,
+            signedClaim.dataValue,
+            signedClaim.nonce,
+            signedClaim.signature
+        ) = abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
     }
 }

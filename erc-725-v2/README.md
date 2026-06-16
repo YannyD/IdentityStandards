@@ -40,9 +40,15 @@ on-chain.
 latestClaimPointerKey = keccak256(abi.encodePacked("ERC725Y.latestClaim", dataKey));
 
 This allows a third party to use the data key to find the correct claim key, which can be used to verify the signer who
-originally posted the claim.
+originally posted the claim. The `getLatestClaim(dataKey)` helper follows this pointer and returns the decoded signed
+claim record.
 
 These data store additions are performed by `ERC725YSignedClaimStore.setDataWithSignature`.
+
+In order to locate the claim data for a given data key, a third party can call `getLatestClaim(dataKey)`, which will
+return the decoded claim record with all of the relevant information, including the signer and signature. The third
+party can then check whether the signer is one they trust, and if so, they can use the claim data value with confidence
+in its provenance.
 
 ## Links
 

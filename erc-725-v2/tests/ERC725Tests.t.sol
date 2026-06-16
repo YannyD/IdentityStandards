@@ -179,26 +179,18 @@ contract ERC725YTest is Test {
         bytes32 expectedClaimKey = erc725Y.getClaimKey(
             accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, keccak256(storedValue)
         );
-        bytes memory claimValue = erc725Y.getData(claimKey);
-        (
-            address signer,
-            address postedBy,
-            address subject,
-            bytes32 dataKey,
-            bytes memory dataValue,
-            uint256 nonce,
-            bytes memory signature
-        ) = abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+        ERC725YSignedClaimStore.SignedClaim memory latestClaim =
+            erc725Y.getLatestClaim(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
         assertTrue(abi.decode(storedValue, (bool)));
         assertEq(claimKey, expectedClaimKey);
-        assertEq(signer, accreditationIssuer);
-        assertEq(postedBy, accreditationIssuer);
-        assertEq(subject, wallet);
-        assertEq(dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        assertTrue(abi.decode(dataValue, (bool)));
-        assertEq(nonce, 0);
-        assertEq(keccak256(signature), keccak256(accreditationSignature));
+        assertEq(latestClaim.signer, accreditationIssuer);
+        assertEq(latestClaim.postedBy, accreditationIssuer);
+        assertEq(latestClaim.subject, wallet);
+        assertEq(latestClaim.dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        assertTrue(abi.decode(latestClaim.dataValue, (bool)));
+        assertEq(latestClaim.nonce, 0);
+        assertEq(keccak256(latestClaim.signature), keccak256(accreditationSignature));
         assertEq(erc725Y.nonces(accreditationIssuer), 1);
     }
 
@@ -206,24 +198,17 @@ contract ERC725YTest is Test {
         vm.prank(thirdPartyReader);
         bytes memory storedValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
-        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-
         vm.prank(thirdPartyReader);
-        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
-
-        vm.prank(thirdPartyReader);
-        bytes memory claimValue = erc725Y.getData(claimKey);
-
-        (address signer, address postedBy, address subject, bytes32 dataKey, bytes memory dataValue,,) =
-            abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+        ERC725YSignedClaimStore.SignedClaim memory latestClaim =
+            erc725Y.getLatestClaim(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
         assertTrue(abi.decode(storedValue, (bool)));
-        assertEq(signer, accreditationIssuer);
-        assertTrue(approvedSigners[signer]);
-        assertEq(postedBy, accreditationIssuer);
-        assertEq(subject, wallet);
-        assertEq(dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        assertTrue(abi.decode(dataValue, (bool)));
+        assertEq(latestClaim.signer, accreditationIssuer);
+        assertTrue(approvedSigners[latestClaim.signer]);
+        assertEq(latestClaim.postedBy, accreditationIssuer);
+        assertEq(latestClaim.subject, wallet);
+        assertEq(latestClaim.dataKey, INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        assertTrue(abi.decode(latestClaim.dataValue, (bool)));
     }
 
     function test_SetUpStoresWalletResidence() external view {
@@ -231,26 +216,17 @@ contract ERC725YTest is Test {
         bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(RESIDENCE_DATA_KEY);
         bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
         bytes32 expectedClaimKey = erc725Y.getClaimKey(wallet, wallet, RESIDENCE_DATA_KEY, keccak256(storedValue));
-        bytes memory claimValue = erc725Y.getData(claimKey);
-        (
-            address signer,
-            address postedBy,
-            address subject,
-            bytes32 dataKey,
-            bytes memory dataValue,
-            uint256 nonce,
-            bytes memory signature
-        ) = abi.decode(claimValue, (address, address, address, bytes32, bytes, uint256, bytes));
+        ERC725YSignedClaimStore.SignedClaim memory latestClaim = erc725Y.getLatestClaim(RESIDENCE_DATA_KEY);
 
         assertEq(string(storedValue), RESIDENCE);
         assertEq(claimKey, expectedClaimKey);
-        assertEq(signer, wallet);
-        assertEq(postedBy, wallet);
-        assertEq(subject, wallet);
-        assertEq(dataKey, RESIDENCE_DATA_KEY);
-        assertEq(string(dataValue), RESIDENCE);
-        assertEq(nonce, 0);
-        assertEq(keccak256(signature), keccak256(residenceSignature));
+        assertEq(latestClaim.signer, wallet);
+        assertEq(latestClaim.postedBy, wallet);
+        assertEq(latestClaim.subject, wallet);
+        assertEq(latestClaim.dataKey, RESIDENCE_DATA_KEY);
+        assertEq(string(latestClaim.dataValue), RESIDENCE);
+        assertEq(latestClaim.nonce, 0);
+        assertEq(keccak256(latestClaim.signature), keccak256(residenceSignature));
         assertEq(erc725Y.nonces(wallet), 1);
     }
 
