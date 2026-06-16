@@ -10,19 +10,15 @@ import {
     OPERATION_3_STATICCALL,
     OPERATION_4_DELEGATECALL
 } from "../src/ERC725X.sol";
-import {
-    ERC725XCreatedContract,
-    ERC725XDelegateTarget,
-    ERC725XOperationTarget,
-    ERC725YSignedDataHarness
-} from "./contracts/index.sol";
-
-error ERC725XTest_InvalidAddressBytes();
+import { ERC725XCreatedContract, ERC725XDelegateTarget, ERC725XOperationTarget } from "./contracts/index.sol";
+import { ERC725YSignedClaimStore } from "../src/ERC725YSignedClaimStore.sol";
+import { Utils } from "./LibUtils.sol";
 
 contract ERC725XTest is Test {
     ERC725X internal erc725X;
 
     function setUp() public virtual {
+        // Deploy a fresh ERC725X contract for each operation-type test.
         erc725X = new ERC725X();
     }
 
@@ -52,7 +48,7 @@ contract ERC725XTest is Test {
 
         bytes memory result =
             erc725X.execute{ value: deployValue }(OPERATION_1_CREATE, address(0), deployValue, creationCode);
-        address deployedAddress = _addressFromBytes(result);
+        address deployedAddress = Utils._addressFromBytes(result);
         ERC725XCreatedContract createdContract = ERC725XCreatedContract(deployedAddress);
 
         assertGt(deployedAddress.code.length, 0);
@@ -68,11 +64,11 @@ contract ERC725XTest is Test {
         bytes32 salt = keccak256("ERC725X_CREATE2_TEST");
         bytes memory bytecode = abi.encodePacked(type(ERC725XCreatedContract).creationCode, abi.encode(initialNumber));
         bytes memory create2Data = abi.encodePacked(bytecode, salt);
-        address expectedAddress = _computeCreate2Address(address(erc725X), salt, bytecode);
+        address expectedAddress = Utils._computeCreate2Address(address(erc725X), salt, bytecode);
 
         bytes memory result =
             erc725X.execute{ value: deployValue }(OPERATION_2_CREATE2, address(0), deployValue, create2Data);
-        address deployedAddress = _addressFromBytes(result);
+        address deployedAddress = Utils._addressFromBytes(result);
         ERC725XCreatedContract createdContract = ERC725XCreatedContract(deployedAddress);
 
         assertEq(deployedAddress, expectedAddress);
@@ -113,30 +109,6 @@ contract ERC725XTest is Test {
         assertEq(erc725X.owner(), newOwner);
         assertEq(target.ownerSlot(), address(0));
     }
-
-    function _computeCreate2Address(
-        address deployer,
-        bytes32 salt,
-        bytes memory bytecode
-    )
-        internal
-        pure
-        returns (address)
-    {
-        bytes32 bytecodeHash = keccak256(bytecode);
-        bytes32 addressHash = keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, bytecodeHash));
-
-        return address(uint160(uint256(addressHash)));
-    }
-
-    function _addressFromBytes(bytes memory data) internal pure returns (address account) {
-        if (data.length != 20) revert ERC725XTest_InvalidAddressBytes();
-
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            account := shr(96, mload(add(data, 32)))
-        }
-    }
 }
 
 contract ERC725YTest is Test {
@@ -145,7 +117,7 @@ contract ERC725YTest is Test {
     bytes32 internal constant RESIDENCE_DATA_KEY = keccak256("identity.walletHolder.residence");
     string internal constant RESIDENCE = "Texas";
 
-    ERC725YSignedDataHarness internal erc725Y;
+    ERC725YSignedClaimStore internal erc725Y;
 
     address internal wallet;
     uint256 internal walletPrivateKey;
@@ -157,14 +129,19 @@ contract ERC725YTest is Test {
     mapping(address signer => bool approved) internal approvedSigners;
 
     function setUp() public virtual {
+        // Create the wallet holder, the accreditation issuer, and a reader that represents an outside verifier.
         (wallet, walletPrivateKey) = makeAddrAndKey("wallet");
         (accreditationIssuer, accreditationIssuerPrivateKey) = makeAddrAndKey("accreditationIssuer");
         thirdPartyReader = makeAddr("thirdPartyReader");
+
+        // The third party will later compare the discovered signer against this approved-signer list.
         approvedSigners[accreditationIssuer] = true;
 
+        // Deploy ERC725Y from the wallet so the wallet holder becomes the ERC173 owner.
         vm.prank(wallet);
-        erc725Y = new ERC725YSignedDataHarness();
+        erc725Y = new ERC725YSignedClaimStore();
 
+        // The accreditation issuer signs a claim that the wallet holder is accredited, then posts that signed data.
         bytes memory accreditationStatus = abi.encode(true);
         accreditationSignature = _signSetData(
             accreditationIssuerPrivateKey,
@@ -183,6 +160,7 @@ contract ERC725YTest is Test {
             accreditationSignature
         );
 
+        // The wallet holder signs and posts their own residence claim.
         bytes memory residence = bytes(RESIDENCE);
         residenceSignature = _signSetData(walletPrivateKey, wallet, wallet, RESIDENCE_DATA_KEY, residence);
 
@@ -293,6 +271,3 @@ contract ERC725YTest is Test {
         return abi.encodePacked(r, s, v);
     }
 }
-
-error ERC725YTest_InvalidSignature(address expectedSigner, address actualSigner);
-error ERC725YTest_InvalidSubject(address expectedSubject, address actualSubject);

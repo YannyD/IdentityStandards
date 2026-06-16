@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.8.29 <0.9.0;
 
-import { ERC725Y } from "../../src/ERC725Y.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-error ERC725YTest_InvalidSignature(address expectedSigner, address actualSigner);
-error ERC725YTest_InvalidSubject(address expectedSubject, address actualSubject);
+import { ERC725Y } from "./ERC725Y.sol";
 
-contract ERC725YSignedDataHarness is ERC725Y, EIP712 {
+error ERC725YSignedClaimStore_InvalidSignature(address expectedSigner, address actualSigner);
+error ERC725YSignedClaimStore_InvalidSubject(address expectedSubject, address actualSubject);
+
+contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
     bytes32 internal constant SET_DATA_TYPEHASH =
         keccak256("SetData(address subject,bytes32 dataKey,bytes32 dataValueHash,uint256 nonce)");
 
     mapping(address signer => uint256 nonce) public nonces;
 
-    event SignedDataChanged(
+    event SignedClaimStored(
         bytes32 indexed claimKey,
         address indexed signer,
         address indexed postedBy,
@@ -35,7 +36,7 @@ contract ERC725YSignedDataHarness is ERC725Y, EIP712 {
         external
     {
         if (subject != owner()) {
-            revert ERC725YTest_InvalidSubject(owner(), subject);
+            revert ERC725YSignedClaimStore_InvalidSubject(owner(), subject);
         }
 
         uint256 nonce = nonces[signer];
@@ -43,7 +44,7 @@ contract ERC725YSignedDataHarness is ERC725Y, EIP712 {
         address recoveredSigner = ECDSA.recover(digest, signature);
 
         if (recoveredSigner != signer) {
-            revert ERC725YTest_InvalidSignature(signer, recoveredSigner);
+            revert ERC725YSignedClaimStore_InvalidSignature(signer, recoveredSigner);
         }
 
         nonces[signer] = nonce + 1;
@@ -58,7 +59,7 @@ contract ERC725YSignedDataHarness is ERC725Y, EIP712 {
         _setData(claimKey, signedData);
         _setData(latestClaimPointerKey, abi.encode(claimKey));
 
-        emit SignedDataChanged(claimKey, recoveredSigner, msg.sender, subject, dataKey, dataValue);
+        emit SignedClaimStored(claimKey, recoveredSigner, msg.sender, subject, dataKey, dataValue);
     }
 
     function getClaimKey(
