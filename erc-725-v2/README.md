@@ -13,31 +13,47 @@ address, but it is accepted only if the supplied EIP-712 signature matches the c
 nonce. Third parties can then read the stored value, find the related signed claim record, and check whether the signer
 is one they trust. The `ERC725YSignedClaimStore` contract writes the following entries for each signed claim:
 
-1. data key -> the claim data value The basic claim data key is linked to its value.
+1. Data key -> claim value.
 
-Ex: INVESTOR_ACCREDITATION_STATUS_DATA_KEY -> true
+The basic claim data key is linked to its current value.
 
-2. claim key -> signed claim data
+```solidity
+INVESTOR_ACCREDITATION_STATUS_DATA_KEY -> true
+```
+
+2. Claim key -> signed claim data.
 
 A claim key is defined by
 
+```solidity
 claimKey = keccak256(abi.encode(signer_address, subject_address, dataKey, keccak256(dataValue)));
+```
 
 and the signed claim data is built by
 
-signedData = abi.encode( signer_address, postedBy_address, subject_address, dataKey, dataValue, nonce, signature );
+```solidity
+signedData = abi.encode(signer_address, postedBy_address, subject_address, dataKey, dataValue, nonce, signature);
+```
 
 where the signature is generated using the EIP-712 standard for signed type data. The signer is taking
 
-{ subject: wallet_address, dataKey: INVESTOR_ACCREDITATION_STATUS_DATA_KEY, dataValueHash: keccak256(dataValue), nonce:
-currentSignerNonce }
+```solidity
+{
+    subject: wallet_address,
+    dataKey: INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+    dataValueHash: keccak256(dataValue),
+    nonce: currentSignerNonce
+}
+```
 
 and combining it with the domain separator of the ERC-725Y contract to produce a signature that can be verified
 on-chain.
 
-3. latest claim pointer -> claim key
+3. Latest claim pointer -> claim key.
 
+```solidity
 latestClaimPointerKey = keccak256(abi.encodePacked("ERC725Y.latestClaim", dataKey));
+```
 
 This allows a third party to use the data key to find the correct claim key, which can be used to verify the signer who
 originally posted the claim. The `getLatestClaim(dataKey)` helper follows this pointer and returns the decoded signed
