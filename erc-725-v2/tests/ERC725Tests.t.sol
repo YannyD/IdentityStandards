@@ -18,7 +18,11 @@ import {
 } from "./contracts/index.sol";
 import {
     ERC725YSignedClaimStore,
-    ERC725YSignedClaimStore_NotDataKeyController
+    ERC725YSignedClaimStore_InvalidDataKeyController,
+    ERC725YSignedClaimStore_InvalidSignature,
+    ERC725YSignedClaimStore_InvalidSubject,
+    ERC725YSignedClaimStore_NotDataKeyController,
+    ERC725YSignedClaimStore_NotDataKeyControllerOrOwner
 } from "../src/ERC725YSignedClaimStore.sol";
 import { Utils } from "./LibUtils.sol";
 
@@ -259,6 +263,24 @@ contract ERC725YTest is Test {
         assertTrue(accreditationVerifier.isAccredited(erc725Y, INVESTOR_ACCREDITATION_STATUS_DATA_KEY));
     }
 
+    function test_SetDataWithSignatureRejectsClaimForDifferentSubject() external {
+        address wrongSubject = makeAddr("wrongSubject");
+        bytes memory accreditationStatus = abi.encode(true);
+        bytes memory signature = _signSetData(
+            accreditationIssuerPrivateKey,
+            accreditationIssuer,
+            wrongSubject,
+            INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+            accreditationStatus
+        );
+
+        vm.prank(accreditationIssuer);
+        vm.expectRevert(abi.encodeWithSelector(ERC725YSignedClaimStore_InvalidSubject.selector, wallet, wrongSubject));
+        erc725Y.setDataWithSignature(
+            accreditationIssuer, wrongSubject, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, accreditationStatus, signature
+        );
+    }
+
     function test_ControllerCanTransferDataKeyControl() external {
         (address replacementIssuer, uint256 replacementIssuerPrivateKey) = makeAddrAndKey("replacementIssuer");
 
@@ -289,6 +311,29 @@ contract ERC725YTest is Test {
         assertEq(erc725Y.dataKeyControllers(INVESTOR_ACCREDITATION_STATUS_DATA_KEY), replacementIssuer);
         assertEq(latestClaim.signer, replacementIssuer);
         assertFalse(abi.decode(latestClaim.dataValue, (bool)));
+    }
+
+    function test_TransferDataKeyControllerRejectsZeroAddress() external {
+        vm.prank(accreditationIssuer);
+        vm.expectRevert(abi.encodeWithSelector(ERC725YSignedClaimStore_InvalidDataKeyController.selector, address(0)));
+        erc725Y.transferDataKeyController(INVESTOR_ACCREDITATION_STATUS_DATA_KEY, address(0));
+    }
+
+    function test_NonControllerCannotTransferDataKeyControl() external {
+        address unauthorizedCaller = makeAddr("unauthorizedControllerCaller");
+        address replacementIssuer = makeAddr("replacementIssuer");
+
+        vm.prank(unauthorizedCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ERC725YSignedClaimStore_NotDataKeyControllerOrOwner.selector,
+                INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+                unauthorizedCaller,
+                accreditationIssuer,
+                wallet
+            )
+        );
+        erc725Y.transferDataKeyController(INVESTOR_ACCREDITATION_STATUS_DATA_KEY, replacementIssuer);
     }
 
     function test_OwnerCanDelegateDataKeyControl() external {
@@ -394,6 +439,22 @@ contract ERC725YTest is Test {
         assertTrue(abi.decode(latestClaim.dataValue, (bool)));
     }
 
+    function test_NonControllerCannotClearDataKey() external {
+        address unauthorizedCaller = makeAddr("unauthorizedClearCaller");
+
+        vm.prank(unauthorizedCaller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ERC725YSignedClaimStore_NotDataKeyControllerOrOwner.selector,
+                INVESTOR_ACCREDITATION_STATUS_DATA_KEY,
+                unauthorizedCaller,
+                accreditationIssuer,
+                wallet
+            )
+        );
+        erc725Y.clearDataKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+    }
+
     function test_SetDataWithSignatureRejectsTamperedValue() external {
         bytes memory signedAccreditationStatus = abi.encode(true);
         bytes memory tamperedAccreditationStatus = abi.encode(false);
@@ -406,7 +467,7 @@ contract ERC725YTest is Test {
         );
 
         vm.prank(accreditationIssuer);
-        vm.expectRevert();
+        vm.expectRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
         erc725Y.setDataWithSignature(
             accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, tamperedAccreditationStatus, signature
         );
@@ -414,7 +475,7 @@ contract ERC725YTest is Test {
 
     function test_SetDataWithSignatureRejectsReplay() external {
         vm.prank(accreditationIssuer);
-        vm.expectRevert();
+        vm.expectRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
         erc725Y.setDataWithSignature(
             accreditationIssuer,
             wallet,

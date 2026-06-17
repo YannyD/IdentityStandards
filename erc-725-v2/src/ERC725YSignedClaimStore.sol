@@ -74,14 +74,14 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         bytes32 dataValueHash = keccak256(dataValue);
         bytes32 claimKey = getClaimKey(recoveredSigner, subject, dataKey, dataValueHash);
         bytes32 latestClaimPointerKey = getLatestClaimPointerKey(dataKey);
-        // solhint-disable-next-line max-line-length
-        bytes memory signedData = abi.encode(recoveredSigner, msg.sender, subject, dataKey, dataValue, nonce, signature);
+        address postedBy = msg.sender;
+        bytes memory signedData = abi.encode(recoveredSigner, postedBy, subject, dataKey, dataValue, nonce, signature);
 
         _setData(dataKey, dataValue);
         _setData(claimKey, signedData);
         _setData(latestClaimPointerKey, abi.encode(claimKey));
 
-        emit SignedClaimStored(claimKey, recoveredSigner, msg.sender, subject, dataKey, dataValue);
+        emit SignedClaimStored(claimKey, recoveredSigner, postedBy, subject, dataKey, dataValue);
     }
 
     function transferDataKeyController(bytes32 dataKey, address newController) external {
