@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.8.29 <0.9.0;
 
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { Test } from "forge-std/src/Test.sol";
 import {
     ERC725X,
@@ -189,16 +190,12 @@ contract ERC725YTest is Test {
 
     function test_SetUpStoresInvestorAccreditationStatus() external view {
         bytes memory storedValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
-        bytes32 expectedClaimKey = erc725Y.getClaimKey(
-            accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, keccak256(storedValue)
-        );
+        bytes32 claimKey = erc725Y.getClaimKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
         ERC725YSignedClaimStore.SignedClaim memory latestClaim =
             erc725Y.getLatestClaim(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
         assertTrue(abi.decode(storedValue, (bool)));
-        assertEq(claimKey, expectedClaimKey);
+        assertGt(erc725Y.getData(claimKey).length, 0);
         assertEq(latestClaim.signer, accreditationIssuer);
         assertEq(latestClaim.postedBy, accreditationIssuer);
         assertEq(latestClaim.subject, wallet);
@@ -220,6 +217,16 @@ contract ERC725YTest is Test {
 
         assertTrue(abi.decode(storedValue, (bool)));
         assertEq(latestClaim.signer, accreditationIssuer);
+        assertEq(keccak256(latestClaim.dataValue), keccak256(storedValue));
+        assertEq(
+            ECDSA.recover(
+                erc725Y.hashSetData(
+                    latestClaim.subject, latestClaim.dataKey, keccak256(latestClaim.dataValue), latestClaim.nonce
+                ),
+                latestClaim.signature
+            ),
+            latestClaim.signer
+        );
         assertTrue(approvedSigners[latestClaim.signer]);
         assertEq(latestClaim.postedBy, accreditationIssuer);
         assertEq(latestClaim.subject, wallet);
@@ -371,11 +378,13 @@ contract ERC725YTest is Test {
     function test_ControllerCanClearDataKeySoNewSignerCanClaimControl() external {
         (address replacementIssuer, uint256 replacementIssuerPrivateKey) = makeAddrAndKey("replacementIssuer");
 
+        bytes32 clearedClaimKey = erc725Y.getClaimKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+
         vm.prank(accreditationIssuer);
         erc725Y.clearDataKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
         assertEq(erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY).length, 0);
-        assertEq(erc725Y.getData(erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY)).length, 0);
+        assertEq(erc725Y.getData(clearedClaimKey).length, 0);
         assertEq(erc725Y.dataKeyControllers(INVESTOR_ACCREDITATION_STATUS_DATA_KEY), address(0));
 
         bytes memory replacementAccreditationStatus = abi.encode(true);
@@ -467,7 +476,7 @@ contract ERC725YTest is Test {
         );
 
         vm.prank(accreditationIssuer);
-        vm.expectRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
+        vm.expectPartialRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
         erc725Y.setDataWithSignature(
             accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, tamperedAccreditationStatus, signature
         );
@@ -475,7 +484,7 @@ contract ERC725YTest is Test {
 
     function test_SetDataWithSignatureRejectsReplay() external {
         vm.prank(accreditationIssuer);
-        vm.expectRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
+        vm.expectPartialRevert(ERC725YSignedClaimStore_InvalidSignature.selector);
         erc725Y.setDataWithSignature(
             accreditationIssuer,
             wallet,
@@ -486,10 +495,8 @@ contract ERC725YTest is Test {
     }
 
     function test_UpdatedAccreditationClaimSupersedesOldClaim() external {
-        bytes memory oldStoredValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        bytes32 oldClaimKey = erc725Y.getClaimKey(
-            accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, keccak256(oldStoredValue)
-        );
+        bytes32 claimKey = erc725Y.getClaimKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
+        bytes32 oldStoredClaimHash = keccak256(erc725Y.getData(claimKey));
         ERC725YSignedClaimStore.SignedClaim memory oldClaim =
             erc725Y.getLatestClaim(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
@@ -512,18 +519,13 @@ contract ERC725YTest is Test {
         );
 
         bytes memory updatedStoredValue = erc725Y.getData(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
-        bytes32 latestClaimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
-        bytes32 expectedLatestClaimKey = erc725Y.getClaimKey(
-            accreditationIssuer, wallet, INVESTOR_ACCREDITATION_STATUS_DATA_KEY, keccak256(updatedStoredValue)
-        );
         ERC725YSignedClaimStore.SignedClaim memory latestClaim =
             erc725Y.getLatestClaim(INVESTOR_ACCREDITATION_STATUS_DATA_KEY);
 
         assertTrue(abi.decode(oldClaim.dataValue, (bool)));
-        assertTrue(erc725Y.getData(oldClaimKey).length > 0);
+        assertNotEq(keccak256(erc725Y.getData(claimKey)), oldStoredClaimHash);
         assertFalse(abi.decode(updatedStoredValue, (bool)));
-        assertEq(latestClaimKey, expectedLatestClaimKey);
+        assertGt(erc725Y.getData(claimKey).length, 0);
         assertFalse(abi.decode(latestClaim.dataValue, (bool)));
         assertEq(latestClaim.nonce, 1);
         assertEq(erc725Y.nonces(accreditationIssuer), 2);
@@ -532,13 +534,11 @@ contract ERC725YTest is Test {
 
     function test_SetUpStoresWalletResidence() external view {
         bytes memory storedValue = erc725Y.getData(RESIDENCE_DATA_KEY);
-        bytes32 latestClaimPointerKey = erc725Y.getLatestClaimPointerKey(RESIDENCE_DATA_KEY);
-        bytes32 claimKey = abi.decode(erc725Y.getData(latestClaimPointerKey), (bytes32));
-        bytes32 expectedClaimKey = erc725Y.getClaimKey(wallet, wallet, RESIDENCE_DATA_KEY, keccak256(storedValue));
+        bytes32 claimKey = erc725Y.getClaimKey(RESIDENCE_DATA_KEY);
         ERC725YSignedClaimStore.SignedClaim memory latestClaim = erc725Y.getLatestClaim(RESIDENCE_DATA_KEY);
 
         assertEq(string(storedValue), RESIDENCE);
-        assertEq(claimKey, expectedClaimKey);
+        assertGt(erc725Y.getData(claimKey).length, 0);
         assertEq(latestClaim.signer, wallet);
         assertEq(latestClaim.postedBy, wallet);
         assertEq(latestClaim.subject, wallet);

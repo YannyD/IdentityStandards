@@ -67,21 +67,16 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
             revert ERC725YSignedClaimStore_InvalidSignature(signer, recoveredSigner);
         }
 
-        _assignOrCheckDataKeyController(dataKey, recoveredSigner);
+        _assignOrCheckDataKeyController(dataKey, signer);
 
         nonces[signer] = nonce + 1;
 
-        bytes32 dataValueHash = keccak256(dataValue);
-        bytes32 claimKey = getClaimKey(recoveredSigner, subject, dataKey, dataValueHash);
-        bytes32 latestClaimPointerKey = getLatestClaimPointerKey(dataKey);
-        address postedBy = msg.sender;
-        bytes memory signedData = abi.encode(recoveredSigner, postedBy, subject, dataKey, dataValue, nonce, signature);
+        bytes32 claimKey = getClaimKey(dataKey);
 
         _setData(dataKey, dataValue);
-        _setData(claimKey, signedData);
-        _setData(latestClaimPointerKey, abi.encode(claimKey));
+        _setData(claimKey, abi.encode(signer, msg.sender, subject, dataKey, dataValue, nonce, signature));
 
-        emit SignedClaimStored(claimKey, recoveredSigner, postedBy, subject, dataKey, dataValue);
+        emit SignedClaimStored(claimKey, signer, msg.sender, subject, dataKey, dataValue);
     }
 
     function transferDataKeyController(bytes32 dataKey, address newController) external {
@@ -100,33 +95,17 @@ contract ERC725YSignedClaimStore is ERC725Y, EIP712 {
         delete dataKeyControllers[dataKey];
 
         _setData(dataKey, "");
-        _setData(getLatestClaimPointerKey(dataKey), "");
+        _setData(getClaimKey(dataKey), "");
 
         emit DataKeyControllerChanged(dataKey, previousController, address(0));
     }
 
-    function getClaimKey(
-        address signer,
-        address subject,
-        bytes32 dataKey,
-        bytes32 dataValueHash
-    )
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(signer, subject, dataKey, dataValueHash));
-    }
-
-    function getLatestClaimPointerKey(bytes32 dataKey) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked("ERC725Y.latestClaim", dataKey));
+    function getClaimKey(bytes32 dataKey) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked("ERC725Y.claim", dataKey));
     }
 
     function getLatestClaim(bytes32 dataKey) public view returns (SignedClaim memory signedClaim) {
-        bytes32 latestClaimPointerKey = getLatestClaimPointerKey(dataKey);
-        bytes32 claimKey = abi.decode(getData(latestClaimPointerKey), (bytes32));
-
-        return _decodeSignedClaim(getData(claimKey));
+        return _decodeSignedClaim(getData(getClaimKey(dataKey)));
     }
 
     function hashSetData(
