@@ -10,41 +10,60 @@ import {
     ERC725V1Identity_InvalidClaimSignature,
     ERC725V1Identity_NotOwner
 } from "../src/ERC725V1Identity.sol";
-import { IdentityRegistry } from "./contracts/IdentityRegistry.sol";
+import { SimplifiedIdentityClaimRegistry } from "./contracts/SimplifiedIdentityClaimRegistry.sol";
 
 contract ERC725V1IdentityTest is Test {
+    // The simplified registry requires both topics before a wallet is considered verified.
     uint256 internal constant INVESTOR_ACCREDITATION_TOPIC = 1;
-    uint256 internal constant RESIDENCE_TOPIC = 2;
-    string internal constant RESIDENCE = "Texas";
+    uint256 internal constant GEOGRAPHIC_LOCATION_TOPIC = 2;
+    string internal constant GEOGRAPHIC_LOCATION = "Texas";
+    string internal constant ALTERNATE_GEOGRAPHIC_LOCATION = "California";
 
     ERC725V1Identity internal investorIdentity;
     ClaimIssuer internal accreditationIssuer;
-    IdentityRegistry internal identityRegistry;
+    ClaimIssuer internal geographicLocationIssuer;
+    SimplifiedIdentityClaimRegistry internal simplifiedClaimRegistry;
 
     address internal wallet;
     uint256 internal walletPrivateKey;
     address internal accreditationIssuerOwner;
     address internal accreditationClaimSigner;
     uint256 internal accreditationClaimSignerPrivateKey;
+    address internal geographicLocationIssuerOwner;
+    address internal geographicLocationClaimSigner;
+    uint256 internal geographicLocationClaimSignerPrivateKey;
     address internal thirdPartyReader;
     bytes internal accreditationSignature;
-    bytes internal residenceSignature;
+    bytes internal geographicLocationSignature;
 
     function setUp() public virtual {
+        // Ivan owns the subject identity; separate issuer identities sign claims about accreditation and location.
         (wallet, walletPrivateKey) = makeAddrAndKey("wallet");
         accreditationIssuerOwner = makeAddr("accreditationIssuerOwner");
         (accreditationClaimSigner, accreditationClaimSignerPrivateKey) = makeAddrAndKey("accreditationClaimSigner");
+        geographicLocationIssuerOwner = makeAddr("geographicLocationIssuerOwner");
+        (geographicLocationClaimSigner, geographicLocationClaimSignerPrivateKey) =
+            makeAddrAndKey("geographicLocationClaimSigner");
         thirdPartyReader = makeAddr("thirdPartyReader");
 
         investorIdentity = new ERC725V1Identity(wallet);
         accreditationIssuer = new ClaimIssuer(accreditationIssuerOwner, accreditationClaimSigner);
+        geographicLocationIssuer = new ClaimIssuer(geographicLocationIssuerOwner, geographicLocationClaimSigner);
 
-        identityRegistry = new IdentityRegistry();
-        identityRegistry.registerIdentity(wallet, investorIdentity, 840);
-        identityRegistry.addClaimTopic(INVESTOR_ACCREDITATION_TOPIC);
-        identityRegistry.addTrustedIssuer(accreditationIssuer, _singleTopicArray(INVESTOR_ACCREDITATION_TOPIC));
-
+        // The registry models the relying party's policy: required topics, allowed data, and trusted issuers.
+        simplifiedClaimRegistry = new SimplifiedIdentityClaimRegistry();
+        simplifiedClaimRegistry.registerIdentity(wallet, investorIdentity);
         bytes memory accreditationStatus = abi.encode(true);
+        bytes memory geographicLocation = bytes(GEOGRAPHIC_LOCATION);
+
+        simplifiedClaimRegistry.addClaimTopic(INVESTOR_ACCREDITATION_TOPIC);
+        simplifiedClaimRegistry.addClaimTopic(GEOGRAPHIC_LOCATION_TOPIC);
+        simplifiedClaimRegistry.addAllowedClaimData(INVESTOR_ACCREDITATION_TOPIC, accreditationStatus);
+        simplifiedClaimRegistry.addAllowedClaimData(GEOGRAPHIC_LOCATION_TOPIC, geographicLocation);
+        simplifiedClaimRegistry.addAllowedClaimData(GEOGRAPHIC_LOCATION_TOPIC, bytes(ALTERNATE_GEOGRAPHIC_LOCATION));
+        simplifiedClaimRegistry.addTrustedIssuer(accreditationIssuer, _singleTopicArray(INVESTOR_ACCREDITATION_TOPIC));
+        simplifiedClaimRegistry.addTrustedIssuer(geographicLocationIssuer, _singleTopicArray(GEOGRAPHIC_LOCATION_TOPIC));
+
         accreditationSignature = _signClaim(
             accreditationIssuer,
             accreditationClaimSignerPrivateKey,
@@ -53,6 +72,7 @@ contract ERC725V1IdentityTest is Test {
             accreditationStatus
         );
 
+        // Bob's approved claim signer posts the accreditation claim onto Ivan's identity.
         vm.prank(accreditationClaimSigner);
         investorIdentity.addClaim(
             INVESTOR_ACCREDITATION_TOPIC,
@@ -63,17 +83,23 @@ contract ERC725V1IdentityTest is Test {
             ""
         );
 
-        bytes memory residence = bytes(RESIDENCE);
-        residenceSignature =
-            _signClaim(investorIdentity, walletPrivateKey, investorIdentity, RESIDENCE_TOPIC, residence);
+        geographicLocationSignature = _signClaim(
+            geographicLocationIssuer,
+            geographicLocationClaimSignerPrivateKey,
+            investorIdentity,
+            GEOGRAPHIC_LOCATION_TOPIC,
+            geographicLocation
+        );
 
-        vm.prank(wallet);
+        // A separate trusted issuer posts the location claim; the registry later decides whether the location is
+        // allowed.
+        vm.prank(geographicLocationClaimSigner);
         investorIdentity.addClaim(
-            RESIDENCE_TOPIC,
+            GEOGRAPHIC_LOCATION_TOPIC,
             investorIdentity.SCHEME_ECDSA(),
-            address(investorIdentity),
-            residenceSignature,
-            residence,
+            address(geographicLocationIssuer),
+            geographicLocationSignature,
+            geographicLocation,
             ""
         );
     }
@@ -84,6 +110,7 @@ contract ERC725V1IdentityTest is Test {
     }
 
     function test_SetUpStoresInvestorAccreditationClaim() external view {
+        // The stored claim keeps the ERC-735 shape and can be validated by the issuer that created it.
         bytes32 claimId = investorIdentity.getClaimId(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC);
         ERC725V1Identity.Claim memory claim = investorIdentity.getClaim(claimId);
         bytes32[] memory topicClaimIds = investorIdentity.getClaimIdsByTopic(INVESTOR_ACCREDITATION_TOPIC);
@@ -103,6 +130,7 @@ contract ERC725V1IdentityTest is Test {
     }
 
     function test_ThirdPartyReadsAccreditationIssuerAndSigner() external {
+        // Sam can inspect the claim, recover the signer, and see that the issuer authorized that signer.
         bytes32 claimId = investorIdentity.getClaimId(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC);
 
         vm.prank(thirdPartyReader);
@@ -118,26 +146,31 @@ contract ERC725V1IdentityTest is Test {
         assertTrue(abi.decode(claim.data, (bool)));
     }
 
-    function test_IsVerifiedAcceptsTrustedAccreditationIssuer() external view {
-        assertTrue(identityRegistry.isVerified(wallet));
+    function test_IsVerifiedAcceptsTrustedAccreditationAndLocationClaims() external view {
+        assertTrue(simplifiedClaimRegistry.isVerified(wallet));
     }
 
     function test_IsVerifiedRejectsUnregisteredWallet() external {
-        assertFalse(identityRegistry.isVerified(makeAddr("unregisteredWallet")));
+        assertFalse(simplifiedClaimRegistry.isVerified(makeAddr("unregisteredWallet")));
     }
 
-    function test_UntrustedIssuerClaimDoesNotAccreditIdentity() external {
+    function test_UntrustedIssuerClaimsDoNotVerifyIdentity() external {
+        // Even valid signatures fail verification if the issuer is not trusted for the required topics.
         address untrustedWallet = makeAddr("untrustedWallet");
         (address untrustedSigner, uint256 untrustedSignerPrivateKey) = makeAddrAndKey("untrustedSigner");
         ClaimIssuer untrustedIssuer = new ClaimIssuer(makeAddr("untrustedIssuerOwner"), untrustedSigner);
         ERC725V1Identity untrustedIdentity = new ERC725V1Identity(untrustedWallet);
         bytes memory accreditationStatus = abi.encode(true);
-        bytes memory signature = _signClaim(
+        bytes memory geographicLocation = bytes(GEOGRAPHIC_LOCATION);
+        bytes memory untrustedAccreditationSignature = _signClaim(
             untrustedIssuer,
             untrustedSignerPrivateKey,
             untrustedIdentity,
             INVESTOR_ACCREDITATION_TOPIC,
             accreditationStatus
+        );
+        bytes memory untrustedGeographicLocationSignature = _signClaim(
+            untrustedIssuer, untrustedSignerPrivateKey, untrustedIdentity, GEOGRAPHIC_LOCATION_TOPIC, geographicLocation
         );
 
         vm.prank(untrustedSigner);
@@ -145,17 +178,56 @@ contract ERC725V1IdentityTest is Test {
             INVESTOR_ACCREDITATION_TOPIC,
             untrustedIdentity.SCHEME_ECDSA(),
             address(untrustedIssuer),
+            untrustedAccreditationSignature,
+            accreditationStatus,
+            ""
+        );
+
+        vm.prank(untrustedSigner);
+        untrustedIdentity.addClaim(
+            GEOGRAPHIC_LOCATION_TOPIC,
+            untrustedIdentity.SCHEME_ECDSA(),
+            address(untrustedIssuer),
+            untrustedGeographicLocationSignature,
+            geographicLocation,
+            ""
+        );
+
+        simplifiedClaimRegistry.registerIdentity(untrustedWallet, untrustedIdentity);
+
+        assertFalse(simplifiedClaimRegistry.isVerified(untrustedWallet));
+    }
+
+    function test_MissingGeographicLocationClaimDoesNotVerifyIdentity() external {
+        // isVerified requires every configured topic; accreditation alone is not enough.
+        address partialWallet = makeAddr("partialWallet");
+        ERC725V1Identity partialIdentity = new ERC725V1Identity(partialWallet);
+        bytes memory accreditationStatus = abi.encode(true);
+        bytes memory signature = _signClaim(
+            accreditationIssuer,
+            accreditationClaimSignerPrivateKey,
+            partialIdentity,
+            INVESTOR_ACCREDITATION_TOPIC,
+            accreditationStatus
+        );
+
+        vm.prank(accreditationClaimSigner);
+        partialIdentity.addClaim(
+            INVESTOR_ACCREDITATION_TOPIC,
+            partialIdentity.SCHEME_ECDSA(),
+            address(accreditationIssuer),
             signature,
             accreditationStatus,
             ""
         );
 
-        identityRegistry.registerIdentity(untrustedWallet, untrustedIdentity, 840);
+        simplifiedClaimRegistry.registerIdentity(partialWallet, partialIdentity);
 
-        assertFalse(identityRegistry.isVerified(untrustedWallet));
+        assertFalse(simplifiedClaimRegistry.isVerified(partialWallet));
     }
 
     function test_AddClaimRejectsTamperedData() external {
+        // A signature over "true" accreditation cannot be reused to submit "false" data.
         bytes memory signedAccreditationStatus = abi.encode(true);
         bytes memory tamperedAccreditationStatus = abi.encode(false);
         bytes memory signature = _signClaim(
@@ -186,6 +258,7 @@ contract ERC725V1IdentityTest is Test {
     }
 
     function test_UpdatedAccreditationClaimSupersedesOldClaim() external {
+        // Claims are keyed by issuer + topic, so a later claim from the same issuer replaces the old value.
         bytes32 claimId = investorIdentity.getClaimId(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC);
         bytes32 oldClaimDataHash = keccak256(investorIdentity.getClaim(claimId).data);
         bytes memory updatedAccreditationStatus = abi.encode(false);
@@ -212,10 +285,69 @@ contract ERC725V1IdentityTest is Test {
         assertEq(updatedClaimId, claimId);
         assertNotEq(keccak256(latestClaim.data), oldClaimDataHash);
         assertFalse(abi.decode(latestClaim.data, (bool)));
-        assertFalse(identityRegistry.isVerified(wallet));
+        assertFalse(simplifiedClaimRegistry.isVerified(wallet));
+    }
+
+    function test_UpdatedGeographicLocationClaimToAlternateAllowedLocationStillVerifies() external {
+        // The registry accepts either allowed location value for the same geographic-location topic.
+        bytes32 claimId = investorIdentity.getClaimId(address(geographicLocationIssuer), GEOGRAPHIC_LOCATION_TOPIC);
+        bytes memory updatedGeographicLocation = bytes(ALTERNATE_GEOGRAPHIC_LOCATION);
+        bytes memory updatedSignature = _signClaim(
+            geographicLocationIssuer,
+            geographicLocationClaimSignerPrivateKey,
+            investorIdentity,
+            GEOGRAPHIC_LOCATION_TOPIC,
+            updatedGeographicLocation
+        );
+
+        vm.prank(geographicLocationClaimSigner);
+        bytes32 updatedClaimId = investorIdentity.addClaim(
+            GEOGRAPHIC_LOCATION_TOPIC,
+            investorIdentity.SCHEME_ECDSA(),
+            address(geographicLocationIssuer),
+            updatedSignature,
+            updatedGeographicLocation,
+            ""
+        );
+
+        ERC725V1Identity.Claim memory latestClaim = investorIdentity.getClaim(claimId);
+
+        assertEq(updatedClaimId, claimId);
+        assertEq(string(latestClaim.data), ALTERNATE_GEOGRAPHIC_LOCATION);
+        assertTrue(simplifiedClaimRegistry.isVerified(wallet));
+    }
+
+    function test_UpdatedGeographicLocationClaimOutsideAllowedLocationsRejectsVerification() external {
+        // The location claim is validly signed, but its data is outside the registry's allowed set.
+        bytes32 claimId = investorIdentity.getClaimId(address(geographicLocationIssuer), GEOGRAPHIC_LOCATION_TOPIC);
+        bytes memory updatedGeographicLocation = bytes("New York");
+        bytes memory updatedSignature = _signClaim(
+            geographicLocationIssuer,
+            geographicLocationClaimSignerPrivateKey,
+            investorIdentity,
+            GEOGRAPHIC_LOCATION_TOPIC,
+            updatedGeographicLocation
+        );
+
+        vm.prank(geographicLocationClaimSigner);
+        bytes32 updatedClaimId = investorIdentity.addClaim(
+            GEOGRAPHIC_LOCATION_TOPIC,
+            investorIdentity.SCHEME_ECDSA(),
+            address(geographicLocationIssuer),
+            updatedSignature,
+            updatedGeographicLocation,
+            ""
+        );
+
+        ERC725V1Identity.Claim memory latestClaim = investorIdentity.getClaim(claimId);
+
+        assertEq(updatedClaimId, claimId);
+        assertEq(string(latestClaim.data), "New York");
+        assertFalse(simplifiedClaimRegistry.isVerified(wallet));
     }
 
     function test_ClaimIssuerOwnerCanRotateClaimSigner() external {
+        // The issuer owner can authorize a new signing key without changing the issuer identity address.
         (address replacementSigner, uint256 replacementSignerPrivateKey) = makeAddrAndKey("replacementSigner");
 
         vm.prank(accreditationIssuerOwner);
@@ -254,6 +386,7 @@ contract ERC725V1IdentityTest is Test {
     }
 
     function test_RemovedClaimSignerCanNoLongerSignClaims() external {
+        // Once a signer is removed from the issuer identity, new claims signed by that key are rejected.
         bytes memory updatedAccreditationStatus = abi.encode(false);
         bytes memory signature = _signClaim(
             accreditationIssuer,
@@ -301,19 +434,22 @@ contract ERC725V1IdentityTest is Test {
 
         assertEq(investorIdentity.getClaimIdsByTopic(INVESTOR_ACCREDITATION_TOPIC).length, 0);
         assertEq(investorIdentity.getClaim(claimId).issuer, address(0));
-        assertFalse(identityRegistry.isVerified(wallet));
+        assertFalse(simplifiedClaimRegistry.isVerified(wallet));
     }
 
-    function test_SetUpStoresWalletResidenceSelfClaim() external view {
-        bytes32 claimId = investorIdentity.getClaimId(address(investorIdentity), RESIDENCE_TOPIC);
+    function test_SetUpStoresGeographicLocationClaim() external view {
+        // Location is represented as a normal identity claim, not as separate registry metadata.
+        bytes32 claimId = investorIdentity.getClaimId(address(geographicLocationIssuer), GEOGRAPHIC_LOCATION_TOPIC);
         ERC725V1Identity.Claim memory claim = investorIdentity.getClaim(claimId);
 
-        assertEq(claim.topic, RESIDENCE_TOPIC);
-        assertEq(claim.issuer, address(investorIdentity));
-        assertEq(string(claim.data), RESIDENCE);
-        assertEq(keccak256(claim.signature), keccak256(residenceSignature));
+        assertEq(claim.topic, GEOGRAPHIC_LOCATION_TOPIC);
+        assertEq(claim.issuer, address(geographicLocationIssuer));
+        assertEq(string(claim.data), GEOGRAPHIC_LOCATION);
+        assertEq(keccak256(claim.signature), keccak256(geographicLocationSignature));
         assertTrue(
-            investorIdentity.isClaimValid(address(investorIdentity), RESIDENCE_TOPIC, claim.signature, claim.data)
+            geographicLocationIssuer.isClaimValid(
+                address(investorIdentity), GEOGRAPHIC_LOCATION_TOPIC, claim.signature, claim.data
+            )
         );
     }
 

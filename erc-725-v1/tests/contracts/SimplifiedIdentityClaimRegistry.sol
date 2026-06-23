@@ -3,25 +3,38 @@ pragma solidity >=0.8.29 <0.9.0;
 
 import { ERC725V1Identity, IClaimIssuer } from "../../src/ERC725V1Identity.sol";
 
-contract IdentityRegistry {
+/// @notice Test helper that compresses identity, claim topic, and trusted issuer registries into one simplified model.
+/// @dev The intent is to keep the example focused on claim issuance and verification while still using the same
+///      outer shape a permissioned ERC-3643 token would normally call: `isVerified(userAddress)`.
+///      The contract name intentionally avoids naming any one downstream standard: it is a simplified model for testing
+///      ERC-734/735-compatible claim identities with registry-based eligibility checks.
+///      This intentionally omits registry metadata such as country; jurisdiction or residence can be represented as
+///      claims on the identity when the test needs them.
+///      In a full ERC-3643 deployment these concerns are usually split across:
+///      - IdentityRegistry / IdentityRegistryStorage: wallet -> onchain identity
+///      - ClaimTopicsRegistry: claim topics required by the token
+///      - TrustedIssuersRegistry: claim issuers trusted for those topics
+contract SimplifiedIdentityClaimRegistry {
     uint256 internal constant SCHEME_ECDSA = 1;
 
     struct IdentityRecord {
         ERC725V1Identity identity;
-        uint16 country;
         bool exists;
     }
 
     mapping(address userAddress => IdentityRecord record) internal identities;
     uint256[] internal claimTopics;
     mapping(uint256 topic => bool exists) internal claimTopicExists;
+    mapping(uint256 topic => mapping(bytes32 dataHash => bool allowed)) internal allowedClaimDataHashes;
+    mapping(uint256 topic => bool exists) internal allowedClaimDataHashExists;
     IClaimIssuer[] internal trustedIssuers;
     mapping(address issuer => bool exists) internal trustedIssuerExists;
     mapping(address issuer => uint256[] topics) internal trustedIssuerClaimTopics;
     mapping(address issuer => mapping(uint256 topic => bool approved)) internal trustedIssuerHasClaimTopic;
 
-    function registerIdentity(address userAddress, ERC725V1Identity identityContract, uint16 country) external {
-        identities[userAddress] = IdentityRecord({ identity: identityContract, country: country, exists: true });
+    // ERC-3643 IdentityRegistry-style registration: link an investor wallet to its ERC-725 v1 identity.
+    function registerIdentity(address userAddress, ERC725V1Identity identityContract) external {
+        identities[userAddress] = IdentityRecord({ identity: identityContract, exists: true });
     }
 
     function contains(address userAddress) external view returns (bool) {
@@ -32,10 +45,7 @@ contract IdentityRegistry {
         return identities[userAddress].identity;
     }
 
-    function investorCountry(address userAddress) external view returns (uint16) {
-        return identities[userAddress].country;
-    }
-
+    // ERC-3643 ClaimTopicsRegistry-style configuration: define which claims are required to pass `isVerified`.
     function addClaimTopic(uint256 claimTopic) external {
         if (claimTopicExists[claimTopic]) {
             return;
@@ -58,6 +68,26 @@ contract IdentityRegistry {
         return claimTopics;
     }
 
+    // Optional claim-data policy for the simplified tests, e.g. accreditation must be true and location can be in
+    // a permitted set.
+    function addAllowedClaimData(uint256 claimTopic, bytes calldata claimData) external {
+        allowedClaimDataHashes[claimTopic][keccak256(claimData)] = true;
+        allowedClaimDataHashExists[claimTopic] = true;
+    }
+
+    function removeAllowedClaimData(uint256 claimTopic, bytes calldata claimData) external {
+        delete allowedClaimDataHashes[claimTopic][keccak256(claimData)];
+    }
+
+    function clearAllowedClaimDataPolicy(uint256 claimTopic) external {
+        delete allowedClaimDataHashExists[claimTopic];
+    }
+
+    function isAllowedClaimData(uint256 claimTopic, bytes calldata claimData) external view returns (bool) {
+        return allowedClaimDataHashes[claimTopic][keccak256(claimData)];
+    }
+
+    // ERC-3643 TrustedIssuersRegistry-style configuration: trust this issuer for the listed claim topics.
     function addTrustedIssuer(IClaimIssuer trustedIssuer, uint256[] calldata issuerClaimTopics) external {
         address issuer = address(trustedIssuer);
 
@@ -151,6 +181,10 @@ contract IdentityRegistry {
         return trustedIssuerHasClaimTopic[issuer][claimTopic];
     }
 
+    /// @notice ERC-3643-shaped eligibility check used by the tests instead of a direct accreditation helper.
+    /// @dev This returns true only when the registered identity has every required claim topic, and each required topic
+    ///      has at least one valid claim from an issuer trusted for that topic. If the registry configured an allowed
+    ///      data policy for a topic, the stored claim data must be in that allowed set.
     function isVerified(address userAddress) external view returns (bool) {
         IdentityRecord memory record = identities[userAddress];
 
@@ -167,6 +201,9 @@ contract IdentityRegistry {
         return true;
     }
 
+    // This is the core ERC-3643 claim-validation loop, kept inline here so the repo can show the flow without deploying
+    // separate registry contracts. It mirrors: identity -> getClaimIdsByTopic -> trusted issuer -> isClaimValid ->
+    // data.
     function _hasValidClaim(ERC725V1Identity identityContract, uint256 claimTopic) internal view returns (bool) {
         bytes32[] memory claimIds = identityContract.getClaimIdsByTopic(claimTopic);
 
@@ -184,12 +221,20 @@ contract IdentityRegistry {
                 continue;
             }
 
-            if (abi.decode(claim.data, (bool))) {
+            if (_claimDataIsAllowed(claimTopic, claim.data)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    function _claimDataIsAllowed(uint256 claimTopic, bytes memory claimData) internal view returns (bool) {
+        if (!allowedClaimDataHashExists[claimTopic]) {
+            return true;
+        }
+
+        return allowedClaimDataHashes[claimTopic][keccak256(claimData)];
     }
 
     function _setTrustedIssuerClaimTopic(address issuer, uint256 claimTopic, bool approved) internal {
