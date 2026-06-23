@@ -7,12 +7,10 @@ import { Test } from "forge-std/src/Test.sol";
 import { ClaimIssuer } from "../src/ClaimIssuer.sol";
 import {
     ERC725V1Identity,
-    ERC725V1Identity_ClaimDoesNotExist,
     ERC725V1Identity_InvalidClaimSignature,
-    ERC725V1Identity_KeyDoesNotExist,
-    ERC725V1Identity_NotManagementKey
+    ERC725V1Identity_NotOwner
 } from "../src/ERC725V1Identity.sol";
-import { AccreditationVerifier } from "./contracts/AccreditationVerifier.sol";
+import { IdentityRegistry } from "./contracts/IdentityRegistry.sol";
 
 contract ERC725V1IdentityTest is Test {
     uint256 internal constant INVESTOR_ACCREDITATION_TOPIC = 1;
@@ -21,11 +19,11 @@ contract ERC725V1IdentityTest is Test {
 
     ERC725V1Identity internal investorIdentity;
     ClaimIssuer internal accreditationIssuer;
-    AccreditationVerifier internal accreditationVerifier;
+    IdentityRegistry internal identityRegistry;
 
     address internal wallet;
     uint256 internal walletPrivateKey;
-    address internal accreditationIssuerManager;
+    address internal accreditationIssuerOwner;
     address internal accreditationClaimSigner;
     uint256 internal accreditationClaimSignerPrivateKey;
     address internal thirdPartyReader;
@@ -34,15 +32,17 @@ contract ERC725V1IdentityTest is Test {
 
     function setUp() public virtual {
         (wallet, walletPrivateKey) = makeAddrAndKey("wallet");
-        accreditationIssuerManager = makeAddr("accreditationIssuerManager");
+        accreditationIssuerOwner = makeAddr("accreditationIssuerOwner");
         (accreditationClaimSigner, accreditationClaimSignerPrivateKey) = makeAddrAndKey("accreditationClaimSigner");
         thirdPartyReader = makeAddr("thirdPartyReader");
 
         investorIdentity = new ERC725V1Identity(wallet);
-        accreditationIssuer = new ClaimIssuer(accreditationIssuerManager, accreditationClaimSigner);
+        accreditationIssuer = new ClaimIssuer(accreditationIssuerOwner, accreditationClaimSigner);
 
-        accreditationVerifier = new AccreditationVerifier();
-        accreditationVerifier.setTrustedIssuer(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC, true);
+        identityRegistry = new IdentityRegistry();
+        identityRegistry.registerIdentity(wallet, investorIdentity, 840);
+        identityRegistry.addClaimTopic(INVESTOR_ACCREDITATION_TOPIC);
+        identityRegistry.addTrustedIssuer(accreditationIssuer, _singleTopicArray(INVESTOR_ACCREDITATION_TOPIC));
 
         bytes memory accreditationStatus = abi.encode(true);
         accreditationSignature = _signClaim(
@@ -78,10 +78,9 @@ contract ERC725V1IdentityTest is Test {
         );
     }
 
-    function test_SetUpDeploysIdentityTiedToWalletManagementKey() external view {
-        assertTrue(
-            investorIdentity.keyHasPurpose(investorIdentity.addressToKey(wallet), investorIdentity.MANAGEMENT_KEY())
-        );
+    function test_SetUpDeploysIdentityTiedToWalletOwner() external view {
+        assertEq(investorIdentity.owner(), wallet);
+        assertTrue(investorIdentity.isClaimSigner(wallet));
     }
 
     function test_SetUpStoresInvestorAccreditationClaim() external view {
@@ -115,22 +114,23 @@ contract ERC725V1IdentityTest is Test {
 
         assertEq(claim.issuer, address(accreditationIssuer));
         assertEq(recoveredSigner, accreditationClaimSigner);
-        assertTrue(
-            accreditationIssuer.keyHasPurpose(
-                accreditationIssuer.addressToKey(recoveredSigner), accreditationIssuer.CLAIM_SIGNER_KEY()
-            )
-        );
+        assertTrue(accreditationIssuer.isClaimSigner(recoveredSigner));
         assertTrue(abi.decode(claim.data, (bool)));
     }
 
-    function test_VerifierAcceptsTrustedAccreditationIssuer() external view {
-        assertTrue(accreditationVerifier.isAccredited(investorIdentity, INVESTOR_ACCREDITATION_TOPIC));
+    function test_IsVerifiedAcceptsTrustedAccreditationIssuer() external view {
+        assertTrue(identityRegistry.isVerified(wallet));
+    }
+
+    function test_IsVerifiedRejectsUnregisteredWallet() external {
+        assertFalse(identityRegistry.isVerified(makeAddr("unregisteredWallet")));
     }
 
     function test_UntrustedIssuerClaimDoesNotAccreditIdentity() external {
+        address untrustedWallet = makeAddr("untrustedWallet");
         (address untrustedSigner, uint256 untrustedSignerPrivateKey) = makeAddrAndKey("untrustedSigner");
-        ClaimIssuer untrustedIssuer = new ClaimIssuer(makeAddr("untrustedIssuerManager"), untrustedSigner);
-        ERC725V1Identity untrustedIdentity = new ERC725V1Identity(wallet);
+        ClaimIssuer untrustedIssuer = new ClaimIssuer(makeAddr("untrustedIssuerOwner"), untrustedSigner);
+        ERC725V1Identity untrustedIdentity = new ERC725V1Identity(untrustedWallet);
         bytes memory accreditationStatus = abi.encode(true);
         bytes memory signature = _signClaim(
             untrustedIssuer,
@@ -150,13 +150,14 @@ contract ERC725V1IdentityTest is Test {
             ""
         );
 
-        assertFalse(accreditationVerifier.isAccredited(untrustedIdentity, INVESTOR_ACCREDITATION_TOPIC));
+        identityRegistry.registerIdentity(untrustedWallet, untrustedIdentity, 840);
+
+        assertFalse(identityRegistry.isVerified(untrustedWallet));
     }
 
-    function test_AddClaimRejectsInvalidIssuerSignature() external {
+    function test_AddClaimRejectsTamperedData() external {
         bytes memory signedAccreditationStatus = abi.encode(true);
         bytes memory tamperedAccreditationStatus = abi.encode(false);
-        uint256 scheme = investorIdentity.SCHEME_ECDSA();
         bytes memory signature = _signClaim(
             accreditationIssuer,
             accreditationClaimSignerPrivateKey,
@@ -164,6 +165,7 @@ contract ERC725V1IdentityTest is Test {
             INVESTOR_ACCREDITATION_TOPIC,
             signedAccreditationStatus
         );
+        uint256 scheme = investorIdentity.SCHEME_ECDSA();
 
         vm.prank(accreditationClaimSigner);
         vm.expectRevert(
@@ -210,18 +212,14 @@ contract ERC725V1IdentityTest is Test {
         assertEq(updatedClaimId, claimId);
         assertNotEq(keccak256(latestClaim.data), oldClaimDataHash);
         assertFalse(abi.decode(latestClaim.data, (bool)));
-        assertFalse(accreditationVerifier.isAccredited(investorIdentity, INVESTOR_ACCREDITATION_TOPIC));
+        assertFalse(identityRegistry.isVerified(wallet));
     }
 
-    function test_ClaimIssuerCanRotateClaimSignerKey() external {
+    function test_ClaimIssuerOwnerCanRotateClaimSigner() external {
         (address replacementSigner, uint256 replacementSignerPrivateKey) = makeAddrAndKey("replacementSigner");
-        bytes32 replacementSignerKey = accreditationIssuer.addressToKey(replacementSigner);
-        uint256 claimSignerPurpose = accreditationIssuer.CLAIM_SIGNER_KEY();
-        uint256 keyType = accreditationIssuer.KEY_TYPE_ECDSA();
-        uint256 scheme = investorIdentity.SCHEME_ECDSA();
 
-        vm.prank(accreditationIssuerManager);
-        accreditationIssuer.addKey(replacementSignerKey, claimSignerPurpose, keyType);
+        vm.prank(accreditationIssuerOwner);
+        accreditationIssuer.addClaimSigner(replacementSigner);
 
         bytes memory updatedAccreditationStatus = abi.encode(false);
         bytes memory replacementSignature = _signClaim(
@@ -235,7 +233,7 @@ contract ERC725V1IdentityTest is Test {
         vm.prank(replacementSigner);
         investorIdentity.addClaim(
             INVESTOR_ACCREDITATION_TOPIC,
-            scheme,
+            investorIdentity.SCHEME_ECDSA(),
             address(accreditationIssuer),
             replacementSignature,
             updatedAccreditationStatus,
@@ -255,14 +253,7 @@ contract ERC725V1IdentityTest is Test {
         assertFalse(abi.decode(latestClaim.data, (bool)));
     }
 
-    function test_RemovedClaimSignerKeyCanNoLongerSignClaims() external {
-        bytes32 signerKey = accreditationIssuer.addressToKey(accreditationClaimSigner);
-        uint256 claimSignerPurpose = accreditationIssuer.CLAIM_SIGNER_KEY();
-        uint256 scheme = investorIdentity.SCHEME_ECDSA();
-
-        vm.prank(accreditationIssuerManager);
-        accreditationIssuer.removeKey(signerKey, claimSignerPurpose);
-
+    function test_RemovedClaimSignerCanNoLongerSignClaims() external {
         bytes memory updatedAccreditationStatus = abi.encode(false);
         bytes memory signature = _signClaim(
             accreditationIssuer,
@@ -271,6 +262,10 @@ contract ERC725V1IdentityTest is Test {
             INVESTOR_ACCREDITATION_TOPIC,
             updatedAccreditationStatus
         );
+        uint256 scheme = investorIdentity.SCHEME_ECDSA();
+
+        vm.prank(accreditationIssuerOwner);
+        accreditationIssuer.removeClaimSigner(accreditationClaimSigner);
 
         vm.prank(accreditationClaimSigner);
         vm.expectRevert(
@@ -290,17 +285,15 @@ contract ERC725V1IdentityTest is Test {
         );
     }
 
-    function test_NonManagementCannotAddClaimSignerKey() external {
-        bytes32 newSignerKey = accreditationIssuer.addressToKey(makeAddr("newSigner"));
-        uint256 claimSignerPurpose = accreditationIssuer.CLAIM_SIGNER_KEY();
-        uint256 keyType = accreditationIssuer.KEY_TYPE_ECDSA();
+    function test_NonOwnerCannotAddClaimSigner() external {
+        address newSigner = makeAddr("newSigner");
 
         vm.prank(thirdPartyReader);
-        vm.expectRevert(abi.encodeWithSelector(ERC725V1Identity_NotManagementKey.selector, thirdPartyReader));
-        accreditationIssuer.addKey(newSignerKey, claimSignerPurpose, keyType);
+        vm.expectRevert(abi.encodeWithSelector(ERC725V1Identity_NotOwner.selector, thirdPartyReader));
+        accreditationIssuer.addClaimSigner(newSigner);
     }
 
-    function test_ManagementCanRemoveClaim() external {
+    function test_OwnerCanRemoveClaim() external {
         bytes32 claimId = investorIdentity.getClaimId(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC);
 
         vm.prank(wallet);
@@ -308,23 +301,7 @@ contract ERC725V1IdentityTest is Test {
 
         assertEq(investorIdentity.getClaimIdsByTopic(INVESTOR_ACCREDITATION_TOPIC).length, 0);
         assertEq(investorIdentity.getClaim(claimId).issuer, address(0));
-        assertFalse(accreditationVerifier.isAccredited(investorIdentity, INVESTOR_ACCREDITATION_TOPIC));
-    }
-
-    function test_RemoveClaimRejectsMissingClaim() external {
-        bytes32 missingClaimId = keccak256("missingClaim");
-
-        vm.prank(wallet);
-        vm.expectRevert(abi.encodeWithSelector(ERC725V1Identity_ClaimDoesNotExist.selector, missingClaimId));
-        investorIdentity.removeClaim(missingClaimId);
-    }
-
-    function test_NonManagementCannotRemoveClaim() external {
-        bytes32 claimId = investorIdentity.getClaimId(address(accreditationIssuer), INVESTOR_ACCREDITATION_TOPIC);
-
-        vm.prank(thirdPartyReader);
-        vm.expectRevert(abi.encodeWithSelector(ERC725V1Identity_NotManagementKey.selector, thirdPartyReader));
-        investorIdentity.removeClaim(claimId);
+        assertFalse(identityRegistry.isVerified(wallet));
     }
 
     function test_SetUpStoresWalletResidenceSelfClaim() external view {
@@ -338,15 +315,6 @@ contract ERC725V1IdentityTest is Test {
         assertTrue(
             investorIdentity.isClaimValid(address(investorIdentity), RESIDENCE_TOPIC, claim.signature, claim.data)
         );
-    }
-
-    function test_RemoveKeyRejectsMissingPurpose() external {
-        bytes32 signerKey = accreditationIssuer.addressToKey(accreditationClaimSigner);
-        uint256 actionPurpose = accreditationIssuer.ACTION_KEY();
-
-        vm.prank(accreditationIssuerManager);
-        vm.expectRevert(abi.encodeWithSelector(ERC725V1Identity_KeyDoesNotExist.selector, signerKey, actionPurpose));
-        accreditationIssuer.removeKey(signerKey, actionPurpose);
     }
 
     function _signClaim(
@@ -364,5 +332,10 @@ contract ERC725V1IdentityTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, digest);
 
         return abi.encodePacked(r, s, v);
+    }
+
+    function _singleTopicArray(uint256 topic) internal pure returns (uint256[] memory topics) {
+        topics = new uint256[](1);
+        topics[0] = topic;
     }
 }

@@ -1,48 +1,37 @@
 # Identity Standards and Implementation: ERC-725 v1
 
-This repo shows the older ERC-725 v1 identity pattern used by ONCHAINID, ERC-3643, and similar permissioned-token
-systems. Instead of storing arbitrary values directly under ERC-725Y data keys, the v1 model separates identity control
-into keys and claims:
+This repo shows the older ERC-725 v1 / ONCHAINID identity-claim pattern used by ERC-3643-style permissioned-token
+systems. It focuses only on the parts needed to compare claim issuance and verification with the ERC-725 v2 example.
 
-- ERC-734-style keys describe who can manage the identity or sign claims.
-- ERC-735-style claims describe facts about the identity, such as accreditation status.
-- Trusted claim issuers validate claims through their own claim-signer keys.
+The v1 lineage stores claims as structured records on an identity:
 
-## Standard Implementation
+- a claim has a topic, scheme, issuer, signature, data, and URI;
+- a trusted issuer contract validates whether the signature came from one of its approved claim signers;
+- an ERC-3643-style identity registry records which wallet owns which identity, which claim topics are required, and which
+  issuers are trusted for each topic;
+- `isVerified(wallet)` reads the wallet's identity, checks the required topics, calls `isClaimValid`, then decodes the
+  claim data.
 
-`ERC725V1Identity` implements a compact version of the key and claim holder pattern.
+## Claim Issuers
 
-1. Management keys.
-
-The identity is deployed with an initial management key:
-
-```solidity
-new ERC725V1Identity(wallet_address);
-```
-
-Internally, addresses are converted to ERC-734-style keys:
+`ClaimIssuer` is an `ERC725V1Identity` configured with an owner and an approved claim signer:
 
 ```solidity
-key = keccak256(abi.encode(account));
+new ClaimIssuer(issuer_owner, claim_signer);
 ```
 
-The management key can add and remove keys with `addKey(key, purpose, keyType)` and `removeKey(key, purpose)`. A key
-with purpose `1` is a management key. A key with purpose `3` is a claim signer key.
-
-2. Claim issuers.
-
-`ClaimIssuer` is also an `ERC725V1Identity`, but it starts with a management key and a claim signer key:
+The owner can rotate signers with:
 
 ```solidity
-new ClaimIssuer(issuer_manager_address, claim_signer_address);
+addClaimSigner(signer);
+removeClaimSigner(signer);
 ```
 
-The issuer validates signatures in `isClaimValid(identity, topic, signature, data)` by recovering the signer from the
-claim hash and checking whether that signer has the claim signer purpose.
+This keeps the example focused on identity claims rather than general-purpose key management.
 
-3. Claims.
+## Claims
 
-Claims are stored on the identity by issuer and topic:
+Claims are stored on the subject identity by issuer and topic:
 
 ```solidity
 claimId = keccak256(abi.encode(issuer, topic));
@@ -63,35 +52,41 @@ Claim({
 
 For an accreditation claim, `data` can be `abi.encode(true)`.
 
-4. Claim signatures.
+## Claim Signatures
 
-The claim signer signs a digest derived from the identity address, claim topic, and claim data:
+The claim signer signs a digest derived from the subject identity address, claim topic, and claim data:
 
 ```solidity
 claimHash = keccak256(abi.encode(identity, topic, data));
 claimDigest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", claimHash));
 ```
 
-The identity accepts `addClaim(topic, scheme, issuer, signature, data, uri)` only when the issuer contract confirms that
-the signature is valid for one of its claim signer keys.
+The subject identity accepts `addClaim(topic, scheme, issuer, signature, data, uri)` only when the issuer contract confirms
+that the signature is valid for one of its approved claim signers.
 
-5. Verification.
+## ERC-3643-Style Verification
 
-A verifier can check an active claim as follows:
+`tests/contracts/IdentityRegistry.sol` compresses the ERC-3643 registry system into one helper contract. It keeps the
+same outer verification shape:
 
-1. Call `getClaimIdsByTopic(topic)` on the identity.
+```solidity
+identityRegistry.registerIdentity(wallet, identity, 840);
+identityRegistry.addClaimTopic(INVESTOR_ACCREDITATION_TOPIC);
+identityRegistry.addTrustedIssuer(accreditationIssuer, topics);
+identityRegistry.isVerified(wallet);
+```
+
+Inside `isVerified`, the registry checks an active claim as follows:
+
+1. Call `getClaimIdsByTopic(topic)` on the subject identity.
 2. Call `getClaim(claimId)` for each claim ID.
 3. Check whether `claim.issuer` is trusted for that topic.
 4. Call `IClaimIssuer(claim.issuer).isClaimValid(identity, claim.topic, claim.signature, claim.data)`.
 5. Decode `claim.data` according to the expected claim type.
 
-`tests/contracts/AccreditationVerifier.sol` demonstrates this flow for an investor accreditation claim. Historical claim
-changes are emitted as `ClaimAdded`, `ClaimChanged`, and `ClaimRemoved` events.
-
 ## Links
 
 - [ERC-725 Reference](https://eips.ethereum.org/EIPS/eip-725)
-- [ERC-734 Reference](https://eips.ethereum.org/EIPS/eip-734)
 - [ERC-735 Reference](https://eips.ethereum.org/EIPS/eip-735)
 - [ERC-3643 Reference](https://eips.ethereum.org/EIPS/eip-3643)
 

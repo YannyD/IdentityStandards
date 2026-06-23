@@ -15,26 +15,14 @@ interface IClaimIssuer {
         returns (bool);
 }
 
-error ERC725V1Identity_NotManagementKey(address account);
+error ERC725V1Identity_NotOwner(address account);
 error ERC725V1Identity_InvalidClaimIssuer(address issuer);
+error ERC725V1Identity_InvalidClaimSigner(address signer);
 error ERC725V1Identity_InvalidClaimSignature(address issuer, uint256 topic);
 error ERC725V1Identity_ClaimDoesNotExist(bytes32 claimId);
-error ERC725V1Identity_KeyDoesNotExist(bytes32 key, uint256 purpose);
 
 contract ERC725V1Identity is IClaimIssuer {
-    uint256 public constant MANAGEMENT_KEY = 1;
-    uint256 public constant ACTION_KEY = 2;
-    uint256 public constant CLAIM_SIGNER_KEY = 3;
-    uint256 public constant ENCRYPTION_KEY = 4;
-
-    uint256 public constant KEY_TYPE_ECDSA = 1;
     uint256 public constant SCHEME_ECDSA = 1;
-
-    struct Key {
-        uint256[] purposes;
-        uint256 keyType;
-        bytes32 key;
-    }
 
     struct Claim {
         uint256 topic;
@@ -45,14 +33,15 @@ contract ERC725V1Identity is IClaimIssuer {
         string uri;
     }
 
-    mapping(bytes32 key => Key keyData) internal keys;
-    mapping(uint256 purpose => bytes32[] keys) internal keysByPurpose;
+    address public owner;
+
     mapping(bytes32 claimId => Claim claim) internal claims;
     mapping(bytes32 claimId => bool exists) internal claimExists;
     mapping(uint256 topic => bytes32[] claimIds) internal claimIdsByTopic;
+    mapping(address signer => bool approved) internal claimSigners;
 
-    event KeyAdded(bytes32 indexed key, uint256 indexed purpose, uint256 indexed keyType);
-    event KeyRemoved(bytes32 indexed key, uint256 indexed purpose, uint256 indexed keyType);
+    event ClaimSignerAdded(address indexed signer);
+    event ClaimSignerRemoved(address indexed signer);
     event ClaimAdded(
         bytes32 indexed claimId,
         uint256 indexed topic,
@@ -73,56 +62,34 @@ contract ERC725V1Identity is IClaimIssuer {
     );
     event ClaimRemoved(bytes32 indexed claimId, uint256 indexed topic, address indexed issuer);
 
-    constructor(address initialManagementKey) {
-        _addKey(addressToKey(initialManagementKey), MANAGEMENT_KEY, KEY_TYPE_ECDSA);
+    constructor(address initialOwner) {
+        owner = initialOwner;
+        _addClaimSigner(initialOwner);
     }
 
-    modifier onlyManagementKey() {
-        if (!keyHasPurpose(addressToKey(msg.sender), MANAGEMENT_KEY)) {
-            revert ERC725V1Identity_NotManagementKey(msg.sender);
+    modifier onlyOwner() {
+        if (msg.sender != owner) {
+            revert ERC725V1Identity_NotOwner(msg.sender);
         }
         _;
     }
 
-    function addressToKey(address account) public pure returns (bytes32) {
-        return keccak256(abi.encode(account));
+    function addClaimSigner(address signer) external onlyOwner returns (bool) {
+        return _addClaimSigner(signer);
     }
 
-    function addKey(bytes32 key, uint256 purpose, uint256 keyType) external onlyManagementKey returns (bool) {
-        return _addKey(key, purpose, keyType);
-    }
-
-    function removeKey(bytes32 key, uint256 purpose) external onlyManagementKey returns (bool) {
-        if (!_keyHasExactPurpose(key, purpose)) {
-            revert ERC725V1Identity_KeyDoesNotExist(key, purpose);
+    function removeClaimSigner(address signer) external onlyOwner returns (bool) {
+        if (!claimSigners[signer]) {
+            return false;
         }
 
-        uint256 keyType = keys[key].keyType;
-        _removePurpose(keys[key].purposes, purpose);
-        _removeKeyForPurpose(keysByPurpose[purpose], key);
-
-        if (keys[key].purposes.length == 0) {
-            delete keys[key];
-        }
-
-        emit KeyRemoved(key, purpose, keyType);
+        claimSigners[signer] = false;
+        emit ClaimSignerRemoved(signer);
         return true;
     }
 
-    function getKey(bytes32 key) external view returns (uint256[] memory purposes, uint256 keyType, bytes32 keyValue) {
-        Key storage keyData = keys[key];
-        return (keyData.purposes, keyData.keyType, keyData.key);
-    }
-
-    function getKeysByPurpose(uint256 purpose) external view returns (bytes32[] memory) {
-        return keysByPurpose[purpose];
-    }
-
-    function keyHasPurpose(bytes32 key, uint256 purpose) public view returns (bool) {
-        bool hasRequestedPurpose = _keyHasExactPurpose(key, purpose);
-        bool hasManagementPurpose = purpose != MANAGEMENT_KEY && _keyHasExactPurpose(key, MANAGEMENT_KEY);
-
-        return hasRequestedPurpose || hasManagementPurpose;
+    function isClaimSigner(address signer) public view returns (bool) {
+        return claimSigners[signer];
     }
 
     function addClaim(
@@ -159,7 +126,7 @@ contract ERC725V1Identity is IClaimIssuer {
         }
     }
 
-    function removeClaim(bytes32 claimId) external onlyManagementKey returns (bool) {
+    function removeClaim(bytes32 claimId) external onlyOwner returns (bool) {
         if (!claimExists[claimId]) {
             revert ERC725V1Identity_ClaimDoesNotExist(claimId);
         }
@@ -217,56 +184,21 @@ contract ERC725V1Identity is IClaimIssuer {
         returns (bool)
     {
         address signer = recoverClaimSigner(identity, topic, signature, data);
-        return keyHasPurpose(addressToKey(signer), CLAIM_SIGNER_KEY);
+        return claimSigners[signer];
     }
 
-    function _addKey(bytes32 key, uint256 purpose, uint256 keyType) internal returns (bool) {
-        if (_keyHasExactPurpose(key, purpose)) {
+    function _addClaimSigner(address signer) internal returns (bool) {
+        if (signer == address(0)) {
+            revert ERC725V1Identity_InvalidClaimSigner(signer);
+        }
+
+        if (claimSigners[signer]) {
             return false;
         }
 
-        if (keys[key].key == bytes32(0)) {
-            keys[key].key = key;
-            keys[key].keyType = keyType;
-        }
-
-        keys[key].purposes.push(purpose);
-        keysByPurpose[purpose].push(key);
-
-        emit KeyAdded(key, purpose, keyType);
+        claimSigners[signer] = true;
+        emit ClaimSignerAdded(signer);
         return true;
-    }
-
-    function _keyHasExactPurpose(bytes32 key, uint256 purpose) internal view returns (bool) {
-        uint256[] storage purposes = keys[key].purposes;
-
-        for (uint256 i = 0; i < purposes.length; i++) {
-            if (purposes[i] == purpose) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    function _removePurpose(uint256[] storage purposes, uint256 purpose) internal {
-        for (uint256 i = 0; i < purposes.length; i++) {
-            if (purposes[i] == purpose) {
-                purposes[i] = purposes[purposes.length - 1];
-                purposes.pop();
-                return;
-            }
-        }
-    }
-
-    function _removeKeyForPurpose(bytes32[] storage purposeKeys, bytes32 key) internal {
-        for (uint256 i = 0; i < purposeKeys.length; i++) {
-            if (purposeKeys[i] == key) {
-                purposeKeys[i] = purposeKeys[purposeKeys.length - 1];
-                purposeKeys.pop();
-                return;
-            }
-        }
     }
 
     function _removeClaimIdForTopic(bytes32[] storage topicClaimIds, bytes32 claimId) internal {

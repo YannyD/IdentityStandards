@@ -1,6 +1,7 @@
 # Full reference https://github.com/foundry-rs/foundry/tree/master/crates/config
 
 [profile.default]
+  allow_paths = ["../erc-725-v2/node_modules"]
   auto_detect_solc = false
   block_timestamp = 1_738_368_000 # Feb 1, 2025 at 00:00 GMT
   bytecode_hash = "none"

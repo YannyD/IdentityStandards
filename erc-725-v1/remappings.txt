@@ -1,2 +1,2 @@
-@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/
-forge-std/=node_modules/forge-std/
+@openzeppelin/contracts/=../erc-725-v2/node_modules/@openzeppelin/contracts/
+forge-std/=../erc-725-v2/node_modules/forge-std/
