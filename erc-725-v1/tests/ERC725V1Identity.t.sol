@@ -2,15 +2,15 @@
 pragma solidity >=0.8.29 <0.9.0;
 
 // solhint-disable-next-line import-path-check
-import { Test } from "forge-std/src/Test.sol";
+import {Test} from "forge-std/src/Test.sol";
 
-import { ClaimIssuer } from "../src/ClaimIssuer.sol";
+import {ClaimIssuer} from "../src/ClaimIssuer.sol";
 import {
     ERC725V1Identity,
     ERC725V1Identity_InvalidClaimSignature,
     ERC725V1Identity_NotOwner
 } from "../src/ERC725V1Identity.sol";
-import { SimplifiedIdentityClaimRegistry } from "./contracts/SimplifiedIdentityClaimRegistry.sol";
+import {SimplifiedIdentityClaimRegistry} from "./contracts/SimplifiedIdentityClaimRegistry.sol";
 
 contract ERC725V1IdentityTest is Test {
     // The simplified registry requires both topics before a wallet is considered verified.
@@ -36,25 +36,47 @@ contract ERC725V1IdentityTest is Test {
     bytes internal accreditationSignature;
     bytes internal geographicLocationSignature;
 
+    /// @notice Initializes test actors, contracts, registry policy, and baseline claims.
     function setUp() public virtual {
+        _setupActors();
+        _deployContracts();
+
+        (bytes memory accreditationStatus, bytes memory geographicLocation) = _configureRegistry();
+
+        _addAccreditationClaim(accreditationStatus);
+        _addGeographicLocationClaim(geographicLocation);
+    }
+
+    /// @notice Creates deterministic test addresses and private keys for actors in this suite.
+    function _setupActors() internal {
         // Ivan owns the subject identity; separate issuer identities sign claims about accreditation and location.
         (wallet, walletPrivateKey) = makeAddrAndKey("wallet");
         accreditationIssuerOwner = makeAddr("accreditationIssuerOwner");
         (accreditationClaimSigner, accreditationClaimSignerPrivateKey) = makeAddrAndKey("accreditationClaimSigner");
         geographicLocationIssuerOwner = makeAddr("geographicLocationIssuerOwner");
-        (geographicLocationClaimSigner, geographicLocationClaimSignerPrivateKey) =
-            makeAddrAndKey("geographicLocationClaimSigner");
+        (geographicLocationClaimSigner, geographicLocationClaimSignerPrivateKey) = makeAddrAndKey(
+            "geographicLocationClaimSigner"
+        );
         thirdPartyReader = makeAddr("thirdPartyReader");
+    }
 
+    /// @notice Deploys identity, issuers, and registry contracts, then links the wallet to its identity.
+    function _deployContracts() internal {
         investorIdentity = new ERC725V1Identity(wallet);
         accreditationIssuer = new ClaimIssuer(accreditationIssuerOwner, accreditationClaimSigner);
         geographicLocationIssuer = new ClaimIssuer(geographicLocationIssuerOwner, geographicLocationClaimSigner);
 
-        // The registry models the relying party's policy: required topics, allowed data, and trusted issuers.
         simplifiedClaimRegistry = new SimplifiedIdentityClaimRegistry();
         simplifiedClaimRegistry.registerIdentity(wallet, investorIdentity);
-        bytes memory accreditationStatus = abi.encode(true);
-        bytes memory geographicLocation = bytes(GEOGRAPHIC_LOCATION);
+    }
+
+    /// @notice Configures required claim topics, allowed claim data, and trusted issuers in the registry.
+    /// @return accreditationStatus Encoded boolean accreditation status allowed by policy.
+    /// @return geographicLocation Encoded primary geographic location allowed by policy.
+    function _configureRegistry() internal returns (bytes memory accreditationStatus, bytes memory geographicLocation) {
+        // The registry models the relying party's policy: required topics, allowed data, and trusted issuers.
+        accreditationStatus = abi.encode(true);
+        geographicLocation = bytes(GEOGRAPHIC_LOCATION);
 
         simplifiedClaimRegistry.addClaimTopic(INVESTOR_ACCREDITATION_TOPIC);
         simplifiedClaimRegistry.addClaimTopic(GEOGRAPHIC_LOCATION_TOPIC);
@@ -62,8 +84,15 @@ contract ERC725V1IdentityTest is Test {
         simplifiedClaimRegistry.addAllowedClaimData(GEOGRAPHIC_LOCATION_TOPIC, geographicLocation);
         simplifiedClaimRegistry.addAllowedClaimData(GEOGRAPHIC_LOCATION_TOPIC, bytes(ALTERNATE_GEOGRAPHIC_LOCATION));
         simplifiedClaimRegistry.addTrustedIssuer(accreditationIssuer, _singleTopicArray(INVESTOR_ACCREDITATION_TOPIC));
-        simplifiedClaimRegistry.addTrustedIssuer(geographicLocationIssuer, _singleTopicArray(GEOGRAPHIC_LOCATION_TOPIC));
+        simplifiedClaimRegistry.addTrustedIssuer(
+            geographicLocationIssuer,
+            _singleTopicArray(GEOGRAPHIC_LOCATION_TOPIC)
+        );
+    }
 
+    /// @notice Signs and stores the investor accreditation claim on the identity.
+    /// @param accreditationStatus Encoded accreditation payload used for signing and claim storage.
+    function _addAccreditationClaim(bytes memory accreditationStatus) internal {
         accreditationSignature = _signClaim(
             accreditationIssuer,
             accreditationClaimSignerPrivateKey,
@@ -82,7 +111,11 @@ contract ERC725V1IdentityTest is Test {
             accreditationStatus,
             ""
         );
+    }
 
+    /// @notice Signs and stores the investor geographic location claim on the identity.
+    /// @param geographicLocation Encoded location payload used for signing and claim storage.
+    function _addGeographicLocationClaim(bytes memory geographicLocation) internal {
         geographicLocationSignature = _signClaim(
             geographicLocationIssuer,
             geographicLocationClaimSignerPrivateKey,
@@ -124,7 +157,10 @@ contract ERC725V1IdentityTest is Test {
         assertEq(keccak256(claim.signature), keccak256(accreditationSignature));
         assertTrue(
             accreditationIssuer.isClaimValid(
-                address(investorIdentity), INVESTOR_ACCREDITATION_TOPIC, claim.signature, claim.data
+                address(investorIdentity),
+                INVESTOR_ACCREDITATION_TOPIC,
+                claim.signature,
+                claim.data
             )
         );
     }
@@ -137,7 +173,10 @@ contract ERC725V1IdentityTest is Test {
         ERC725V1Identity.Claim memory claim = investorIdentity.getClaim(claimId);
 
         address recoveredSigner = accreditationIssuer.recoverClaimSigner(
-            address(investorIdentity), INVESTOR_ACCREDITATION_TOPIC, claim.signature, claim.data
+            address(investorIdentity),
+            INVESTOR_ACCREDITATION_TOPIC,
+            claim.signature,
+            claim.data
         );
 
         assertEq(claim.issuer, address(accreditationIssuer));
@@ -170,7 +209,11 @@ contract ERC725V1IdentityTest is Test {
             accreditationStatus
         );
         bytes memory untrustedGeographicLocationSignature = _signClaim(
-            untrustedIssuer, untrustedSignerPrivateKey, untrustedIdentity, GEOGRAPHIC_LOCATION_TOPIC, geographicLocation
+            untrustedIssuer,
+            untrustedSignerPrivateKey,
+            untrustedIdentity,
+            GEOGRAPHIC_LOCATION_TOPIC,
+            geographicLocation
         );
 
         vm.prank(untrustedSigner);
@@ -378,7 +421,10 @@ contract ERC725V1IdentityTest is Test {
 
         assertEq(
             accreditationIssuer.recoverClaimSigner(
-                address(investorIdentity), INVESTOR_ACCREDITATION_TOPIC, latestClaim.signature, latestClaim.data
+                address(investorIdentity),
+                INVESTOR_ACCREDITATION_TOPIC,
+                latestClaim.signature,
+                latestClaim.data
             ),
             replacementSigner
         );
@@ -448,7 +494,10 @@ contract ERC725V1IdentityTest is Test {
         assertEq(keccak256(claim.signature), keccak256(geographicLocationSignature));
         assertTrue(
             geographicLocationIssuer.isClaimValid(
-                address(investorIdentity), GEOGRAPHIC_LOCATION_TOPIC, claim.signature, claim.data
+                address(investorIdentity),
+                GEOGRAPHIC_LOCATION_TOPIC,
+                claim.signature,
+                claim.data
             )
         );
     }
@@ -459,11 +508,7 @@ contract ERC725V1IdentityTest is Test {
         ERC725V1Identity identity,
         uint256 topic,
         bytes memory data
-    )
-        internal
-        pure
-        returns (bytes memory)
-    {
+    ) internal pure returns (bytes memory) {
         bytes32 digest = issuer.getClaimDigest(address(identity), topic, data);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, digest);
 
