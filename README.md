@@ -2,7 +2,8 @@
 
 This repository compares two ways to model reusable identity claims onchain:
 
-- `erc-725-v1`: ERC-725 v1 / ERC-734 / ERC-735 / ONCHAINID-style claim identities.
+- `erc-725-v1`: ERC-725 v1 / ERC-734 / ERC-735 / ONCHAINID-style claim identities. ERC-3643 permissioned-token compliance is implemented on top of this model as an example.
+
 - `erc-725-v2`: ERC-725Y-style signed attestations stored as key-value data.
 
 ## Standards Links
